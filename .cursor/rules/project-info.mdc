@@ -1,0 +1,188 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+📌 inventory-api 애플리케이션 전용 프롬프트 (AI 전달용)
+
+당신은 Go로 고성능 gRPC 기반 재고 서비스(inventory-api)를 구현하는 시니어 서버 엔지니어입니다.
+인프라/배포(K8s/Helm/IaC)는 이미 준비되어 있으니, 애플리케이션 코드/계약/도메인/관측/테스트에만 집중하세요.
+
+## 0) 컨텍스트
+- 시스템 목표: 티켓 오픈 시 대규모 트래픽에서 **오버셀 0%**로 좌석/수량 재고를 관리.
+- 상위 호출자: reservation-api(Spring) gRPC 클라이언트.
+- 데이터 저장: **Amazon DynamoDB** (온디맨드 가정, 트랜잭션/조건부 업데이트 사용).
+- 인터페이스: **gRPC** (프로토버퍼). 내부에서만 사용되며, 짧은 타임아웃 응답이 핵심.
+
+## 1) 기술 스택(애플리케이션만)
+- Go 1.22+, linux/arm64
+- gRPC + protobuf (`google.golang.org/grpc`, `google.golang.org/protobuf`)
+- DynamoDB AWS SDK v2 (`github.com/aws/aws-sdk-go-v2/*`)
+- 관측: OpenTelemetry(OTLP), Prometheus(client_golang)
+- 로깅: zap(JSON 구조 로그)
+- 검증: go-playground/validator 또는 자체 검증
+- 복원력(클라이언트 X, 서버 관점): 컨텍스트 데드라인 준수, idempotency 처리
+
+## 2) 도메인/저장소 모델 (DynamoDB)
+테이블 설계(단순·핵심 위주):
+- `inventory`  
+  - PK: `event_id` (string)
+  - attrs: `remaining`(number), `version`(number, 낙관적 잠금용), `updated_at`(iso8601)
+  - (선택) `section_remaining`(map) 또는 별도 `inventory_seats`
+- `inventory_seats` (좌석 단건 관리가 필요할 때만)
+  - PK: `event_id#seat_id` (string) / attrs: `status`(AVAILABLE|HOLD|SOLD), `reservation_id`
+- **요구**: 수량형과 좌석형 둘 다 지원.
+  - 수량형: `remaining >= qty` 조건부 감소
+  - 좌석형: 좌석 문서 집합에 대해 “모두 AVAILABLE” 조건으로 **TransactWrite**(상태=HOLD/SOLD)
+
+### 트랜잭션/일관성 규칙
+- **CommitReservation**:  
+  - 수량형 → `UpdateItem` with Condition `remaining >= :qty` + `SET remaining = remaining - :qty, version = version + 1`
+  - 좌석형 → `TransactWrite`:
+    1) 각 좌석 항목에 `attribute_not_exists(reservation_id) AND status = 'HOLD' OR 'AVAILABLE'` 조건으로 `status='SOLD'`
+    2) 요약 행(inventory.remaining) 동기 감소(옵션)
+- **ReleaseHold**:
+  - 수량형 → `remaining = remaining + :qty` 조건(옵션: 예약 상태 검사)
+  - 좌석형 → 좌석 문서 `status='AVAILABLE'`, `reservation_id` 제거
+
+- **멱등성 키**: `reservation_id` 기준으로 **idempotent** 보장(같은 요청은 같은 결과 반환).
+  - 서버는 `reservation_id` 처리 기록을 짧은 TTL 캐시(로컬 LRU 또는 DynamoDB item)로 유지.
+
+## 3) gRPC 계약(.proto) — 생성물에 포함
+
+syntax = “proto3”;
+package inventory.v1;
+
+option go_package = “github.com/traffictacos/inventory-api/genproto/inventory/v1;inventoryv1”;
+
+service Inventory {
+// 재고 가용성 간단 확인(선택적)
+rpc CheckAvailability(CheckReq) returns (CheckRes);
+
+// 예약 확정(재고 감소/좌석 확정) - 오버셀 0%를 보장해야 함
+rpc CommitReservation(CommitReq) returns (CommitRes);
+
+// 홀드/가용성 복원
+rpc ReleaseHold(ReleaseReq) returns (ReleaseRes);
+}
+
+message SeatRef {
+string seat_id = 1;
+}
+
+message CheckReq {
+string event_id = 1;
+// qty가 0보다 크면 수량형, seat_ids가 비어있지 않으면 좌석형. 둘 다 오면 좌석형 우선.
+int32 qty = 2;
+repeated SeatRef seat_ids = 3;
+}
+
+message CheckRes {
+bool available = 1;
+repeated string unavailable_seats = 2;
+}
+
+message CommitReq {
+string reservation_id = 1;
+string event_id = 2;
+int32 qty = 3;
+repeated SeatRef seat_ids = 4;
+string payment_intent_id = 5;
+}
+
+message CommitRes {
+string order_id = 1;
+string status = 2; // “CONFIRMED”
+}
+
+message ReleaseReq {
+string reservation_id = 1;
+string event_id = 2;
+int32 qty = 3;
+repeated SeatRef seat_ids = 4;
+}
+
+message ReleaseRes {
+string status = 1; // “RELEASED”
+}
+
+## 4) 서버 동작(핵심 로직 요구)
+- **CheckAvailability**:
+  - 수량형: `remaining >= qty` 빠른 조회(강 일관성 get, 또는 캐시)
+  - 좌석형: 대상 좌석들의 상태가 모두 AVAILABLE/HOLD(해당 rsv)인지 점검
+- **CommitReservation**:
+  - 입력 검증 → **멱등 체크**(reservation_id) → DynamoDB **조건부 갱신/트랜잭션** → 결과 생성
+  - 실패 케이스: 조건 불일치(재고 부족/좌석 점유) → **gRPC Status = ABORTED(409)** 로 매핑
+  - 타임아웃 준수(서버는 200ms 내 처리 목표)
+- **ReleaseHold**:
+  - 멱등 처리 후 가용성 복원. 존재하지 않거나 이미 복원된 경우 **성공으로 간주**(idempotent success).
+- **예약/좌석 상태 저장** 자체는 reservation-api가 주도하므로, inventory-api는 **재고 진실**에만 집중.
+
+## 5) 에러 매핑(중요)
+- 재고 충돌/조건 불일치 → `codes.Aborted` (HTTP 409에 해당)
+- 잘못된 인자 → `codes.InvalidArgument` (HTTP 400)
+- 데드라인 초과 → `codes.DeadlineExceeded` (HTTP 504)
+- 내부 오류 → `codes.Internal` (HTTP 500)
+- 권한 문제(내부만 사용이지만 포함) → `codes.PermissionDenied` 또는 `codes.Unauthenticated`
+
+에러 상세는 `status.WithDetails`로 `ErrorInfo{ reason, reservation_id, event_id }` 포함.
+
+## 6) 성능/동시성/튜닝 목표
+- 서버 핸들러 **P95 < 40ms**, 오류율 < 0.5%
+- gRPC 서버:
+  - max concurrent streams 충분히 높게, keepalive on
+  - 요청당 컨텍스트 데드라인 검사(기본 250ms)
+- DynamoDB:
+  - 조건식/TransactWrite 최소화(필요 필드만)
+  - 핫 파티션 피하기 위해 `event_id`가 과도하게 집중되면 **샤딩 키(event_id#shard)** 옵션 제공
+- 멱등 캐시:
+  - 로컬 LRU(예: 1~5분 TTL) + DDB 항목 병행(프로세스 재시작 보호)
+- 고루틴 풀:
+  - 좌석형 대량 좌석 처리 시 내부 배치(최대 N 좌석/트랜잭션) 전략 선택 가능하도록 플래그 제공
+
+## 7) 관측/로그/메트릭
+- OpenTelemetry: 서버 인터셉터로 `traceparent` 수용/전파
+- Prometheus:
+  - `grpc_server_handling_seconds_bucket{method}`
+  - `dynamodb_latency_seconds_bucket{op}`
+  - `inventory_conflicts_total{type=quantity|seat}`
+  - `idempotent_hit_total`
+- 구조 로그(JSON): `ts, level, method, event_id, reservation_id, latency_ms, ddb_rcu, ddb_wcu, outcome`
+
+## 8) 설정(코드/환경만)
+- 환경변수(샘플 키만; 값 주입은 외부에서):
+  - `AWS_REGION`
+  - `DDB_TABLE_INVENTORY=inventory`
+  - `DDB_TABLE_SEATS=inventory_seats`
+  - `IDEMPOTENCY_TTL_SECONDS=300`
+  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
+  - `LOG_LEVEL=info`
+- 서버 포트: `GRPC_PORT=8080` (env)
+
+## 9) 테스트/품질(코드 중심)
+- 단위: 트랜잭션 빌더/조건식 생성/멱등 처리 로직 테스트
+- 통합: **Testcontainers(LocalStack)** 로 DynamoDB 통합 테스트
+  - 시나리오: 정상 감소, 동시 커밋 충돌, 좌석 더블커밋 방지, Release 멱등성
+- 부하: 간단 `ghz` 또는 `k6-grpc` 스크립트 제공 (서버 내 `tools/` 폴더)
+  - 목표: Commit 500–800 rps 구간에서 p95<40ms 유지
+- 계약: `.proto`가 단일 진실원천 → 생성 코드와 서버/클라 컴파일 확인
+
+## 10) 산출물(리포 구조)
+- `/cmd/inventory-api/main.go`
+- `/internal/server/` (gRPC 서버, 인터셉터, 오류 매핑)
+- `/internal/service/` (도메인 로직: commit/release/check, 멱등)
+- `/internal/repo/` (DynamoDB 접근: 조건식/트랜잭션 빌더)
+- `/internal/observability/` (otel, prometheus, logger)
+- `/internal/config/` (env 파서, 기본값)
+- `/proto/inventory.proto` (+ `make generate` 스크립트)
+- `/tests/` (unit + integration with LocalStack)
+- `Makefile` (lint/test/build/generate), `Dockerfile`(멀티스테이지, arm64), `README.md`
+
+## 11) 추가 요구(선택적 기능 플래그)
+- `INVENTORY_MODE=quantity|seat` : 수량/좌석 모드 선택
+- 좌석형에서 **HOLD→SOLD 이동**을 하나의 TransactWrite로 커버(원자성 보장)
+- 수량형에서 **version(Optimistic Lock)** 을 사용한 방어도 켜고 끌 수 있게
+
+### 최종 지시
+위 명세에 따라 inventory-api의 **애플리케이션 코드/프로토/도메인/테스트/관측**을 생성하세요.
+인프라/배포 스펙(K8s/Helm/IaC)은 포함하지 말고, 환경변수 키만 노출하며 값 주입은 외부에서 처리되도록 하세요.

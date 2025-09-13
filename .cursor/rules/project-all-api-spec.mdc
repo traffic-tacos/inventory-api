@@ -1,0 +1,511 @@
+---
+description: 서비스 간 API 계약 및 인터페이스 정의
+globs:
+alwaysApply: true
+---
+
+# API 계약 및 인터페이스 정의
+
+## 🎯 설계 원칙
+
+**30k RPS 폭주 시나리오 기반 계약 중심 API 설계**
+- 유입 30k RPS → 대기열에서 평탄화 → 입장 제어 → 핵심 경로 최적화 → 이벤트 기반 비동기 처리
+
+## 🔐 공통 규약
+
+### 인증 및 권한
+```http
+Authorization: Bearer <JWT>
+```
+- 일부 공개 엔드포인트 제외 (대기열 참여 등)
+- OpenTelemetry 트레이싱 헤더 자동 전파
+
+### 멱등성 관리
+```http
+Idempotency-Key: <uuid-v4>
+```
+- POST/PUT/PATCH/DELETE 필수 헤더
+- 게이트웨이/예약 API에서 검증
+- Redis 기반 저장 (TTL: 5분)
+
+### 타임아웃 가이드
+| 호출 패턴 | 제한 시간 | 목적 |
+|----------|----------|------|
+| 게이트웨이 → 백엔드 | ≤ 600ms | 빠른 응답 보장 |
+| 예약 → 재고(gRPC) | ≤ 250ms | 트랜잭션 최적화 |
+| 웹훅 처리 | ≤ 30s | 외부 서비스 대응 |
+
+### 에러 응답 포맷
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "human readable message",
+    "trace_id": "..."
+  }
+}
+```
+
+---
+
+## 1. 🌐 API Gateway (REST)
+
+### 1.1 대기열 관리 (Queue/Admission)
+
+**대기열 참여**
+```http
+POST /api/v1/queue/join
+Content-Type: application/json
+
+{
+  "event_id": "evt_2025_1001",
+  "user_id": "u123"
+}
+```
+```http
+202 Accepted
+{
+  "waiting_token": "wtkn_abc123",
+  "position_hint": 12345
+}
+```
+
+**대기열 상태 조회**
+```http
+GET /api/v1/queue/status?token=wtkn_abc123
+```
+```http
+200 OK
+{
+  "status": "waiting|ready|expired",
+  "eta_sec": 42
+}
+```
+
+**입장 허가**
+```http
+POST /api/v1/queue/enter
+Authorization: Bearer <JWT>  # 선택적
+Idempotency-Key: <uuid>
+Content-Type: application/json
+
+{
+  "waiting_token": "wtkn_abc123"
+}
+```
+```http
+200 OK
+{
+  "admission": "granted",
+  "reservation_token": "rtkn_xyz789",
+  "ttl_sec": 30
+}
+```
+
+### 1.2 예약 관리 (Reservation Proxy)
+
+**예약 생성**
+```http
+POST /api/v1/reservations
+Authorization: Bearer <JWT>
+Idempotency-Key: <uuid>
+Content-Type: application/json
+
+{
+  "event_id": "evt_2025_1001",
+  "seat_ids": ["A-12", "A-13"],
+  "quantity": 2
+}
+```
+```http
+201 Created
+{
+  "reservation_id": "rsv_abc123",
+  "hold_expires_at": "2024-01-01T12:05:00Z"
+}
+```
+
+**예약 확정**
+```http
+POST /api/v1/reservations/rsv_abc123/confirm
+Authorization: Bearer <JWT>
+Idempotency-Key: <uuid>
+```
+```http
+200 OK
+{
+  "order_id": "ord_xyz789",
+  "status": "CONFIRMED"
+}
+```
+
+**예약 취소**
+```http
+POST /api/v1/reservations/rsv_abc123/cancel
+Authorization: Bearer <JWT>
+Idempotency-Key: <uuid>
+```
+```http
+200 OK
+{
+  "status": "CANCELLED"
+}
+```
+
+### 1.3 결제 관리 (Payment Proxy)
+
+**결제 인텐트 생성**
+```http
+POST /api/v1/payment/intent
+Authorization: Bearer <JWT>
+Idempotency-Key: <uuid>
+Content-Type: application/json
+
+{
+  "reservation_id": "rsv_abc123",
+  "amount": 120000,
+  "currency": "KRW",
+  "scenario": "approve|fail|delay"
+}
+```
+```http
+200 OK
+{
+  "payment_intent_id": "pay_xyz789",
+  "next": "webhook"
+}
+```
+
+### 성능 목표
+- **P95 지연시간**: < 50ms (백엔드 제외)
+- **429 비율**: ≤ 1% (대기열 제어 기반)
+
+---
+
+## 2. 🎫 Reservation API (Spring Boot)
+
+### 2.1 예약 라이프사이클
+
+**예약 생성 (멱등성)**
+```http
+POST /v1/reservations
+Authorization: Bearer <JWT>
+Idempotency-Key: <uuid>
+Content-Type: application/json
+
+{
+  "event_id": "evt_2025_1001",
+  "seat_ids": ["A-12", "A-13"],
+  "reservation_token": "rtkn_xyz789",
+  "user_id": "u123"
+}
+```
+```http
+201 Created
+{
+  "reservation_id": "rsv_abc123",
+  "hold_expires_at": "2024-01-01T12:05:00Z"
+}
+```
+
+**예약 확정**
+```http
+POST /v1/reservations/rsv_abc123/confirm
+Content-Type: application/json
+
+{
+  "payment_intent_id": "pay_xyz789"
+}
+```
+```http
+200 OK
+{
+  "order_id": "ord_xyz789",
+  "status": "CONFIRMED"
+}
+```
+
+**예약 취소**
+```http
+POST /v1/reservations/rsv_abc123/cancel
+```
+```http
+200 OK
+{
+  "status": "CANCELLED"
+}
+```
+
+**예약 조회**
+```http
+GET /v1/reservations/rsv_abc123
+```
+```http
+200 OK
+{
+  "reservation_id": "rsv_abc123",
+  "status": "HOLD|CONFIRMED|CANCELLED",
+  "hold_expires_at": "2024-01-01T12:05:00Z"
+}
+```
+
+### 성능 목표
+- **P95 지연시간**: < 120ms (확정 제외)
+- **에러율**: < 1%
+
+---
+
+## 3. 🎭 Inventory Service (Go + gRPC)
+
+### 3.1 gRPC 인터페이스 정의
+
+```protobuf
+syntax = "proto3";
+package inventory.v1;
+
+service Inventory {
+  rpc CheckAvailability(CheckReq) returns (CheckRes);
+  rpc CommitReservation(CommitReq) returns (CommitRes);
+  rpc ReleaseHold(ReleaseReq) returns (ReleaseRes);
+}
+
+message CheckReq {
+  string event_id = 1;
+  repeated string seat_ids = 2;
+  int32 qty = 3;
+}
+
+message CheckRes {
+  bool available = 1;
+  repeated string unavailable_seats = 2;
+}
+
+message CommitReq {
+  string reservation_id = 1;
+  string event_id = 2;
+  repeated string seat_ids = 3;
+  int32 qty = 4;
+  string payment_intent_id = 5;
+}
+
+message CommitRes {
+  string order_id = 1;
+  string status = 2;
+}
+
+message ReleaseReq {
+  string reservation_id = 1;
+  string event_id = 2;
+  repeated string seat_ids = 3;
+  int32 qty = 4;
+}
+
+message ReleaseRes {
+  string status = 1;
+}
+```
+
+### 주요 특징
+- **오버셀 방지**: DynamoDB 조건부 업데이트 + TransactWrite
+- **타임아웃**: 클라이언트 deadline ≤ 250ms
+- **재시도 금지**: 멱등성 기반 재호출로 해결
+
+### 성능 목표
+- **P95 지연시간**: < 40ms
+- **오류율**: < 0.5%
+
+---
+
+## 4. 💳 Payment Simulator (Node.js)
+
+### 4.1 결제 인텐트 생성
+
+```http
+POST /v1/sim/intent
+Content-Type: application/json
+
+{
+  "reservation_id": "rsv_abc123",
+  "amount": 120000,
+  "scenario": "approve|fail|delay"
+}
+```
+```http
+200 OK
+{
+  "payment_intent_id": "pay_xyz789",
+  "status": "PENDING"
+}
+```
+
+### 4.2 결제 웹훅
+
+```http
+POST /v1/sim/webhook
+X-Signature: sha256=<hmac>
+Content-Type: application/json
+
+{
+  "type": "payment.approved|payment.failed",
+  "reservation_id": "rsv_abc123",
+  "payment_intent_id": "pay_xyz789",
+  "ts": "2024-01-01T12:00:00Z"
+}
+```
+```http
+200 OK
+{
+  "received": true
+}
+```
+
+---
+
+## 5. ⚙️ Worker Service (Go + Events)
+
+### 5.1 이벤트 스키마
+
+```json
+{
+  "id": "evt_uuid_v4",
+  "type": "reservation.hold.created|reservation.hold.expired|payment.approved|payment.failed",
+  "source": "reservation-api|payment-sim",
+  "detail": {
+    "reservation_id": "rsv_abc123",
+    "event_id": "evt_2025_1001",
+    "qty": 2,
+    "seat_ids": ["A-12", "A-13"],
+    "payment_intent_id": "pay_xyz789"
+  },
+  "time": "2024-01-01T12:00:00Z",
+  "trace_id": "..."
+}
+```
+
+### 이벤트 처리 로직
+- **reservation.hold.expired** → `inventory-api.ReleaseHold()`
+- **payment.approved** → `inventory-api.CommitReservation()`
+- **멱등성 보장**: reservation_id 기반 중복 처리 방지
+- **신뢰성**: DLQ + 최대 재시도 + 배치 처리
+
+### 성능 목표
+- **배치 처리 P95**: < 80ms
+- **Lag 안정화**: 이벤트 처리 지연 최소화
+
+---
+
+## 6. 📊 읽기 전용 조회 API (선택)
+
+### 이벤트 가용성 조회
+```http
+GET /api/v1/events/evt_2025_1001/availability
+```
+```http
+200 OK
+{
+  "remaining": 1234,
+  "sections": [
+    {
+      "id": "A",
+      "remain": 120
+    }
+  ]
+}
+```
+
+---
+
+## 📊 데이터 모델 (DynamoDB)
+
+### Reservations 테이블
+```javascript
+// Primary Key
+pk: reservation_id  // "rsv_abc123"
+sk: event_id        // "evt_2025_1001"
+
+// Attributes
+user_id: "u123"
+status: "HOLD|CONFIRMED|CANCELLED"
+seat_ids: ["A-12", "A-13"]
+quantity: 2
+total_price: 50000
+hold_expires_at: "2024-01-01T12:05:00Z"
+idempotency_key: "uuid-v4"
+created_at: "2024-01-01T12:00:00Z"
+updated_at: "2024-01-01T12:00:00Z"
+```
+
+### Orders 테이블
+```javascript
+// Primary Key
+pk: order_id        // "ord_xyz789"
+sk: reservation_id  // "rsv_abc123"
+
+// Attributes
+user_id: "u123"
+event_id: "evt_2025_1001"
+seat_ids: ["A-12", "A-13"]
+total_amount: 50000
+status: "CONFIRMED"
+payment_intent_id: "pay_xyz789"
+created_at: "2024-01-01T12:00:00Z"
+```
+
+### Inventory 테이블
+```javascript
+// Primary Key
+pk: event_id        // "evt_2025_1001"
+sk: "metadata"      // 파티션 내 정렬 키
+
+// Attributes
+total_seats: 10000
+remaining_seats: 8500
+version: 42  // 낙관적 잠금용
+sections: {
+  "A": { remaining: 120, total: 200 },
+  "B": { remaining: 80, total: 150 }
+}
+last_updated: "2024-01-01T12:00:00Z"
+```
+
+---
+
+## 🔴 에러 코드 표
+
+| 코드 | HTTP | 설명 |
+|------|------|------|
+| `UNAUTHENTICATED` | 401 | JWT 누락/만료 |
+| `FORBIDDEN` | 403 | 권한 부족/허용 전 입장 |
+| `RATE_LIMITED` | 429 | 레이트 초과 |
+| `IDEMPOTENCY_REQUIRED` | 400 | 멱등성 키 누락 |
+| `IDEMPOTENCY_CONFLICT` | 409 | 동일 키 + 다른 요청 |
+| `RESERVATION_EXPIRED` | 409 | 홀드 만료 |
+| `PAYMENT_NOT_APPROVED` | 412 | 결제 승인 전 |
+| `INVENTORY_CONFLICT` | 409 | 재고 부족/충돌 |
+| `UPSTREAM_TIMEOUT` | 504 | 백엔드 타임아웃 |
+
+---
+
+## 📈 처리량 제어 가이드
+
+### 단계별 처리량 관리
+1. **유입 (Join/Status)**: 최대 30k RPS (CloudFront 캐시 활용)
+2. **입장 (Enter)**: 1,000 RPS로 제한 (Admission Worker)
+3. **예약 생성**: 500-1,500 RPS (환경별 조정)
+4. **예약 확정**: 300-800 RPS (DB 트랜잭션 한계)
+
+### Redis 키 설계
+```javascript
+// 입장 허용 토큰
+allow:<event_id>:<waiting_token>  // TTL: 30초
+
+// 멱등성 저장
+idempotency:<key>  // TTL: 5분
+
+// 레이트 리미팅
+ratelimit:<user_ip>  // TTL: 1초
+```
+
+---
+
+*이 문서는 서비스 간 API 계약 및 인터페이스의 공식 정의입니다.*

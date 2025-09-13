@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package inventory.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/traffictacos/inventory-api/genproto/inventory/v1;inventoryv1";
+
+// Inventory service for managing ticket inventory with zero oversell guarantee
+service Inventory {
+  // CheckAvailability checks if inventory is available for the given event
+  rpc CheckAvailability(CheckReq) returns (CheckRes);
+
+  // CommitReservation commits a reservation by reducing inventory
+  // This operation is atomic and guarantees zero oversell
+  rpc CommitReservation(CommitReq) returns (CommitRes);
+
+  // ReleaseHold releases a hold on inventory (idempotent operation)
+  rpc ReleaseHold(ReleaseReq) returns (ReleaseRes);
+}
+
+// SeatRef represents a reference to a specific seat
+message SeatRef {
+  string seat_id = 1;
+}
+
+// CheckReq represents a request to check availability
+message CheckReq {
+  string event_id = 1;
+  // If qty > 0, check quantity-based inventory
+  // If seat_ids is not empty, check seat-based inventory (takes precedence)
+  int32 qty = 2;
+  repeated SeatRef seat_ids = 3;
+}
+
+// CheckRes represents the response to availability check
+message CheckRes {
+  bool available = 1;
+  repeated string unavailable_seats = 2;
+}
+
+// CommitReq represents a request to commit a reservation
+message CommitReq {
+  string reservation_id = 1;
+  string event_id = 2;
+  int32 qty = 3;
+  repeated SeatRef seat_ids = 4;
+  string payment_intent_id = 5;
+}
+
+// CommitRes represents the response to commit reservation
+message CommitRes {
+  string order_id = 1;
+  string status = 2; // "CONFIRMED"
+}
+
+// ReleaseReq represents a request to release a hold
+message ReleaseReq {
+  string reservation_id = 1;
+  string event_id = 2;
+  int32 qty = 3;
+  repeated SeatRef seat_ids = 4;
+}
+
+// ReleaseRes represents the response to release hold
+message ReleaseRes {
+  string status = 1; // "RELEASED"
+}

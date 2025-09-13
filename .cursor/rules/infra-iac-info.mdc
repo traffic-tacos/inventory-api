@@ -1,0 +1,276 @@
+---
+description: Infrastructure as Code (IaC) 및 클라우드 인프라 구성 가이드
+alwaysApply: true
+---
+
+# Infrastructure as Code (IaC) 구성
+
+## 🎯 IaC 목표
+Traffic Tacos 프로젝트의 AWS 인프라를 Terraform으로 관리하는 완전 자동화된 IaC 시스템
+
+## 🏗️ 아키텍처 설계
+
+### 네트워크 토폴로지
+```
+VPC (10.180.0.0/20)
+├── Public Tier (10.180.0.0/26, 10.180.0.64/26)
+│   ├── ALB/NLB (외부 트래픽 진입)
+│   ├── Bastion Host (관리용)
+│   └── NAT Gateway (Private 아웃바운드)
+│
+├── Private App Tier (10.180.1.0/25, 10.180.1.128/25)
+│   ├── EKS 노드 그룹
+│   ├── API Gateway 파드
+│   └── Application 파드들
+│
+└── Private DB Tier (10.180.2.0/26, 10.180.2.64/26)
+    ├── RDS Aurora (데이터베이스)
+    ├── ElastiCache Redis (캐시)
+    └── DynamoDB VPC 엔드포인트
+```
+
+## 📁 프로젝트 구조
+
+```
+terraform/
+├── main.tf                    # 메인 리소스 정의
+├── providers.tf              # 프로바이더 설정
+├── backend.tf                # S3 백엔드 설정
+├── variables.tf              # 입력 변수
+├── outputs.tf                # 출력 값
+├── terraform.tfvars         # 변수 값 (환경별)
+└── modules/
+    ├── vpc/                  # VPC 네트워크 모듈
+    │   ├── main.tf          # VPC, 서브넷, 라우팅
+    │   ├── variables.tf     # VPC 설정 변수
+    │   ├── outputs.tf       # VPC 출력 값
+    │   └── README.md        # 모듈 설명
+    ├── eks/                  # EKS 클러스터 모듈
+    ├── rds/                  # RDS 데이터베이스 모듈
+    └── security/             # 보안 그룹 모듈
+```
+
+## 🔧 주요 리소스 구성
+
+### VPC 모듈 (`modules/vpc/`)
+```hcl
+# 입력 변수
+variable "vpc_cidr" {
+  description = "VPC CIDR 블록"
+  type        = string
+  default     = "10.180.0.0/20"
+}
+
+variable "azs" {
+  description = "가용 영역 목록"
+  type        = list(string)
+  default     = ["ap-northeast-2a", "ap-northeast-2c"]
+}
+
+# 출력 값
+output "vpc_id" {
+  description = "VPC ID"
+  value       = aws_vpc.main.id
+}
+
+output "public_subnet_ids" {
+  description = "Public 서브넷 ID 목록"
+  value       = aws_subnet.public[*].id
+}
+```
+
+### EKS 클러스터 구성
+- **버전**: 1.28+
+- **노드 그룹**: 관리형 노드 그룹
+- **인스턴스 타입**: m6g.large (Graviton2, ARM64)
+- **AutoScaling**: Karpenter 기반
+- **네트워킹**: Calico CNI
+
+### 보안 그룹 전략
+```hcl
+# ALB 보안 그룹
+resource "aws_security_group" "alb" {
+  name_prefix = "traffic-tacos-alb"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+```
+
+## 🚀 배포 워크플로우
+
+### 1. 초기화
+```bash
+# Terraform 초기화
+terraform init
+
+# 워크스페이스 생성
+terraform workspace select dev || terraform workspace new dev
+```
+
+### 2. 계획 및 검증
+```bash
+# 변경사항 계획
+terraform plan -var-file="dev.tfvars"
+
+# 코드 포맷팅
+terraform fmt -recursive
+
+# 유효성 검증
+terraform validate
+```
+
+### 3. 배포
+```bash
+# 인프라 배포
+terraform apply -var-file="dev.tfvars"
+
+# 출력 값 확인
+terraform output
+```
+
+### 4. 정리
+```bash
+# 인프라 제거 (주의!)
+terraform destroy -var-file="dev.tfvars"
+```
+
+## 🔒 보안 고려사항
+
+### 네트워크 보안
+- **Private 서브넷**: 인터넷 직접 접근 불가
+- **NAT Gateway**: 아웃바운드 트래픽만 허용
+- **Security Group**: 최소 권한 원칙 적용
+- **VPC 엔드포인트**: AWS 서비스 프라이빗 연결
+
+### IAM 정책
+```hcl
+# IRSA 정책 예시
+data "aws_iam_policy_document" "gateway_api" {
+  statement {
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:Query"
+    ]
+    resources = [
+      aws_dynamodb_table.reservations.arn,
+      aws_dynamodb_table.orders.arn
+    ]
+  }
+}
+```
+
+## 📊 모니터링 및 로깅
+
+### CloudWatch 구성
+- **VPC Flow Logs**: 네트워크 트래픽 로깅
+- **CloudTrail**: API 호출 감사
+- **X-Ray**: 애플리케이션 추적
+
+### 비용 모니터링
+- **Cost Allocation Tags**: 리소스별 비용 추적
+- **Budgets**: 예산 알림 설정
+- **RI/SP Coverage**: 예약 인스턴스 최적화
+
+## 🧪 테스트 전략
+
+### 단위 테스트
+```hcl
+# Terratest 예시
+func TestVpcCreation(t *testing.T) {
+  terraformOptions := &terraform.Options{
+    TerraformDir: "../examples/vpc",
+  }
+
+  defer terraform.Destroy(t, terraformOptions)
+  terraform.InitAndApply(t, terraformOptions)
+
+  vpcId := terraform.Output(t, terraformOptions, "vpc_id")
+  assert.NotEmpty(t, vpcId)
+}
+```
+
+### 통합 테스트
+- **Kitchen-Terraform**: IaC 통합 테스트
+- **AWS Config Rules**: 인프라 컴플라이언스 검증
+- **Prowler**: 보안 취약점 스캔
+
+## 🔄 CI/CD 파이프라인
+
+### GitHub Actions 워크플로우
+```yaml
+name: 'IaC CI/CD'
+on:
+  push:
+    branches: [main]
+    paths: ['terraform/**']
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check
+      - run: terraform validate
+
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform plan
+
+  apply:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform apply -auto-approve
+```
+
+## 📋 체크리스트
+
+### 필수 구성 요소
+- [ ] VPC 및 서브넷 생성
+- [ ] 인터넷 게이트웨이 및 NAT 게이트웨이
+- [ ] 보안 그룹 및 네트워크 ACL
+- [ ] EKS 클러스터 및 노드 그룹
+- [ ] RDS Aurora 클러스터
+- [ ] ElastiCache Redis 클러스터
+- [ ] S3 백엔드 및 잠금 테이블
+
+### 보안 강화
+- [ ] IRSA 설정 및 IAM 역할
+- [ ] VPC 엔드포인트 구성
+- [ ] CloudTrail 및 Config 활성화
+- [ ] 보안 그룹 최소 권한 적용
+
+### 모니터링
+- [ ] CloudWatch 대시보드
+- [ ] VPC Flow Logs 설정
+- [ ] Cost Allocation Tags
+
+### 고가용성
+- [ ] Multi-AZ 배포
+- [ ] AutoScaling 그룹
+- [ ] 백업 및 복구 전략
+
+---
+
+*이 문서는 Traffic Tacos 프로젝트의 IaC 구성 및 배포 가이드입니다.*
