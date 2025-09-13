@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 	"github.com/traffictacos/inventory-api/internal/repo"
 	"github.com/traffictacos/inventory-api/internal/service"
 	"github.com/traffictacos/inventory-api/proto"
@@ -21,14 +21,14 @@ import (
 
 // Server represents the gRPC server
 type Server struct {
-	config   *config.Config
+	config   *appconfig.Config
 	server   *grpc.Server
 	listener net.Listener
 	service  *service.InventoryService
 }
 
 // NewServer creates a new gRPC server
-func NewServer(cfg *config.Config) (*Server, error) {
+func NewServer(cfg *appconfig.Config) (*Server, error) {
 	// Create repository
 	repository, err := repo.NewDynamoDBRepository(cfg)
 	if err != nil {

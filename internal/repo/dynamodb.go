@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 )
 
 // DynamoDBRepository handles DynamoDB operations
@@ -20,8 +21,8 @@ type DynamoDBRepository struct {
 }
 
 // NewDynamoDBRepository creates a new DynamoDB repository
-func NewDynamoDBRepository(cfg *config.Config) (*DynamoDBRepository, error) {
-	awsCfg, err := config.LoadDefaultConfig(context.Background())
+func NewDynamoDBRepository(cfg *appconfig.Config) (*DynamoDBRepository, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}

@@ -4,16 +4,14 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 // Config holds all configuration for the application
 type Config struct {
-	Server       ServerConfig
-	AWS          AWSConfig
-	DynamoDB     DynamoDBConfig
-	Idempotency  IdempotencyConfig
+	Server        ServerConfig
+	AWS           AWSConfig
+	DynamoDB      DynamoDBConfig
+	Idempotency   IdempotencyConfig
 	Observability ObservabilityConfig
 }
 
@@ -27,15 +25,15 @@ type ServerConfig struct {
 
 // AWSConfig holds AWS-related configuration
 type AWSConfig struct {
-	Region string `json:"region"`
+	Region  string `json:"region"`
 	Profile string `json:"profile,omitempty"`
 }
 
 // DynamoDBConfig holds DynamoDB configuration
 type DynamoDBConfig struct {
-	TableInventory string `json:"table_inventory"`
-	TableSeats     string `json:"table_seats"`
-	MaxRetries     int    `json:"max_retries"`
+	TableInventory string        `json:"table_inventory"`
+	TableSeats     string        `json:"table_seats"`
+	MaxRetries     int           `json:"max_retries"`
 	Timeout        time.Duration `json:"timeout"`
 }
 

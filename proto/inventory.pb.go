@@ -4,7 +4,7 @@
 // 	protoc        v6.32.0
 // source: proto/inventory.proto
 
-package inventoryv1
+package proto
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -462,7 +462,7 @@ const file_proto_inventory_proto_rawDesc = "" +
 	"\tInventory\x12C\n" +
 	"\x11CheckAvailability\x12\x16.inventory.v1.CheckReq\x1a\x16.inventory.v1.CheckRes\x12E\n" +
 	"\x11CommitReservation\x12\x17.inventory.v1.CommitReq\x1a\x17.inventory.v1.CommitRes\x12A\n" +
-	"\vReleaseHold\x12\x18.inventory.v1.ReleaseReq\x1a\x18.inventory.v1.ReleaseResBIZGgithub.com/traffictacos/inventory-api/genproto/inventory/v1;inventoryv1b\x06proto3"
+	"\vReleaseHold\x12\x18.inventory.v1.ReleaseReq\x1a\x18.inventory.v1.ReleaseResB-Z+github.com/traffictacos/inventory-api/protob\x06proto3"
 
 var (
 	file_proto_inventory_proto_rawDescOnce sync.Once

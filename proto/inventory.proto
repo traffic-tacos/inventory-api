@@ -4,7 +4,7 @@ package inventory.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/traffictacos/inventory-api/genproto/inventory/v1;inventoryv1";
+option go_package = "github.com/traffictacos/inventory-api/proto";
 
 // Inventory service for managing ticket inventory with zero oversell guarantee
 service Inventory {

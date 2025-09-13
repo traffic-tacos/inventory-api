@@ -4,7 +4,7 @@
 // - protoc             v6.32.0
 // source: proto/inventory.proto
 
-package inventoryv1
+package proto
 
 import (
 	context "context"

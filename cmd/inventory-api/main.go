@@ -9,13 +9,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 	"github.com/traffictacos/inventory-api/internal/server"
+)
+
+var (
+	version   = "dev"
+	buildTime = "unknown"
 )
 
 func main() {
 	// Load configuration
-	cfg, err := config.Load()
+	cfg, err := appconfig.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
@@ -28,7 +33,7 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Starting inventory-api server on port %d", cfg.Server.Port)
+		fmt.Printf("Starting inventory-api server on port %d", cfg.Server.Port)
 		if err := srv.Start(); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
 		}

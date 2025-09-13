@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 )
 
 // Metrics holds all Prometheus metrics
@@ -129,7 +129,7 @@ func NewMetrics() *Metrics {
 }
 
 // StartMetricsServer starts the Prometheus metrics HTTP server
-func (m *Metrics) StartMetricsServer(cfg *config.Config) error {
+func (m *Metrics) StartMetricsServer(cfg *appconfig.Config) error {
 	http.Handle("/metrics", promhttp.Handler())
 	return http.ListenAndServe(fmt.Sprintf(":%d", cfg.Observability.MetricsPort), nil)
 }

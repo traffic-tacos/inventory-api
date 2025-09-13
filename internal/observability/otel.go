@@ -15,13 +15,13 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 )
 
 var tracer trace.Tracer
 
 // InitTracer initializes OpenTelemetry tracer
-func InitTracer(cfg *config.Config) error {
+func InitTracer(cfg *appconfig.Config) error {
 	ctx := context.Background()
 
 	// Create OTLP exporter

@@ -7,19 +7,19 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
-	"github.com/traffictacos/inventory-api/internal/config"
+	appconfig "github.com/traffictacos/inventory-api/internal/config"
 	"github.com/traffictacos/inventory-api/internal/repo"
 	"github.com/traffictacos/inventory-api/proto"
 )
 
 // InventoryService handles inventory business logic
 type InventoryService struct {
-	repo    *repo.DynamoDBRepository
-	config  *config.Config
+	repo   *repo.DynamoDBRepository
+	config *appconfig.Config
 }
 
 // NewInventoryService creates a new inventory service
-func NewInventoryService(repo *repo.DynamoDBRepository, cfg *config.Config) *InventoryService {
+func NewInventoryService(repo *repo.DynamoDBRepository, cfg *appconfig.Config) *InventoryService {
 	return &InventoryService{
 		repo:   repo,
 		config: cfg,
