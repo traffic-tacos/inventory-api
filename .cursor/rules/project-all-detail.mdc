@@ -1,0 +1,906 @@
+---
+description: Traffic Tacos 전체 아키텍처 및 시스템 설계 상세
+globs:
+alwaysApply: true
+---
+
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is the **Traffic Tacos MSA (Microservices Architecture) Platform** - a high-performance ticket reservation system designed to handle **30k RPS traffic**. The system consists of **six main components** including backend services (Go/Kotlin) and frontend (React), following cloud-native patterns with event-driven architecture.
+
+**Important**: Each service is maintained as an **independent Git repository** and built independently with its own **Dockerfile**. This repository contains all services for development purposes, but in production each service is deployed separately from its own repository.
+
+### Architecture Components
+
+**Multi-Layer Architecture:**
+
+```
+                    Layer 0: Frontend
+              ┌─────────────────────────┐
+              │   Reservation Web       │
+              │     (React/Vite)        │
+              │  • User Interface       │
+              │  • State Management     │
+              │  • Real-time Updates    │
+              └─────────┬───────────────┘
+                        │ HTTP/REST + WebSocket
+                        ▼
+                    Layer 1: API Gateway
+                ┌─────────────────────────┐
+                │     Gateway API         │
+                │    (Go/Fiber)          │
+                │  • Authentication       │
+                │  • Routing             │
+                │  • Rate Limiting       │
+                └─────────┬───────────────┘
+                          │ gRPC
+                ┌─────────┼───────────────┐
+                │         │               │
+        Layer 2: Business Services        │
+     ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+     │ Reservation API │ │  Inventory API  │ │ Payment Sim API │
+     │ (Kotlin/Spring) │ │   (Go/gRPC)     │ │   (Go/Echo)     │
+     └─────────┬───────┘ └─────────────────┘ └─────────────────┘
+               │
+               │ Events (EventBridge/SQS)
+               ▼
+        Layer 3: Background Processing
+     ┌─────────────────────────────────────┐
+     │      Reservation Worker             │
+     │      (Kubernetes Job + KEDA)        │
+     │   • Event-driven processing         │
+     │   • Auto-scaling based on queue     │
+     │   • Expiry & cleanup tasks          │
+     └─────────────────────────────────────┘
+```
+
+- **Layer 0 - Frontend**:
+  - **reservation-web**: React-based user interface with real-time updates and state management (React + Vite)
+- **Layer 1 - Gateway API**: Single entry point for authentication, routing, and traffic control (Go + Fiber)
+- **Layer 2 - Business Services**:
+  - **reservation-api**: Core reservation management with 60s hold periods and event publishing (Kotlin + Spring Boot WebFlux)
+  - **inventory-api**: High-performance inventory management with zero oversell guarantee (Go + gRPC)
+  - **payment-sim-api**: Payment processing simulator with webhook support (Go + Echo)
+- **Layer 3 - Background Processing**:
+  - **reservation-worker**: Event-driven Kubernetes job with KEDA auto-scaling for reservation expiry and cleanup tasks
+
+## Development Commands
+
+### AWS Resource Management
+
+**IMPORTANT**: Each service requires actual AWS resources to function properly. Use the AWS resource discovery script to identify and configure the correct resource names:
+
+```bash
+# Discover all AWS resources (DynamoDB, SQS, EventBridge, IAM)
+./discover_aws_resources.sh
+
+# Generate service-specific .env files with actual resource names
+./discover_aws_resources.sh generate
+
+# Check specific AWS resource types
+./discover_aws_resources.sh dynamodb      # DynamoDB tables
+./discover_aws_resources.sh sqs          # SQS queues
+./discover_aws_resources.sh eventbridge  # EventBridge buses and rules
+./discover_aws_resources.sh iam          # IAM roles and policies
+```
+
+**Key AWS Resources Required:**
+- **DynamoDB Tables**: reservations, orders, idempotency, outbox, inventory, inventory_seats
+- **SQS Queues**: reservation-worker queue, dead letter queues
+- **EventBridge**: Custom event bus, rules for reservation events
+- **IAM Roles**: Service roles for DynamoDB access, EventBridge publishing
+
+### Building and Testing
+
+Each service is **independently deployable** with its own build system and **Dockerfile**. Navigate to each service directory and use the respective build commands:
+
+**Reservation API (Kotlin/Gradle):**
+```bash
+cd reservation-api
+# Full local setup with Docker services
+./run_local.sh start
+
+# Build only
+./gradlew clean build
+
+# Run tests
+./gradlew test
+./gradlew integrationTest
+
+# Performance tests
+./gradlew jmeterRun
+
+# Docker build
+docker build -t reservation-api:latest .
+```
+
+**Inventory API (Go/Make):**
+```bash
+cd inventory-api
+# Full build and test pipeline
+make all
+
+# Individual commands
+make build
+make test
+make lint
+
+# Docker build
+make docker-build
+
+# Load testing
+make load-test-ghz
+```
+
+**Payment Sim API (Go/Make):**
+```bash
+cd payment-sim-api
+# Full CI pipeline
+make ci
+
+# Individual commands
+make build
+make test
+make lint
+
+# Docker build
+make docker-build
+
+# Performance tests
+make perf-test
+```
+
+**Gateway API (Go):**
+```bash
+cd gateway-api
+# Build
+go build -o gateway-api ./cmd/gateway-api
+
+# Test
+go test ./...
+
+# Docker build
+docker build -t gateway-api:latest .
+```
+
+### Service-Specific Development
+
+**Reservation API** has the most comprehensive development environment:
+- `./run_local.sh setup`: Start Docker services (DynamoDB, LocalStack, OTEL)
+- `./run_local.sh build`: Build application
+- `./run_local.sh start`: Complete setup + build + run
+- `./generate_proto.sh`: Regenerate gRPC proto files
+
+**Inventory API** focuses on high performance:
+- `make generate`: Generate protobuf Go code
+- `make docker-build`: Build Docker image for ARM64/AMD64
+- Uses DynamoDB with conditional updates for zero oversell
+
+**Payment Sim API** simulates external payment processing:
+- `make run-local`: Start with webhook secret
+- Provides webhook endpoints for payment status updates
+
+## Core Architecture Patterns
+
+### Technology Stack by Service
+
+| Layer | Service | Framework | Database | Communication | Key Features |
+|-------|---------|-----------|----------|---------------|--------------|
+| 0 | Reservation Web | React + Vite | LocalStorage/State | HTTP + WebSocket | SPA, Real-time UI, State management |
+| 1 | Gateway | Go + Fiber | Redis | HTTP + JWT | Authentication, Routing, Rate limiting |
+| 2 | Reservation | Kotlin + Spring WebFlux | DynamoDB | REST + gRPC | Reactive, Event sourcing |
+| 2 | Inventory | Go + gRPC | DynamoDB | gRPC | High performance, Zero oversell |
+| 2 | Payment Sim | Go + Echo | In-memory | REST + Webhooks | External API simulation |
+| 3 | Reservation Worker | Go/Kotlin | DynamoDB | SQS + Events | K8s Job, KEDA scaling, Background processing |
+
+### Event-Driven Architecture
+
+- **EventBridge**: Custom event bus for inter-service communication
+- **SQS Queues**: Message queues for worker job processing
+- **Outbox Pattern**: Implemented in reservation-api for reliable event delivery
+- **DLQ Support**: Dead letter queues for failed event processing
+- **KEDA Scaling**: Auto-scaling based on SQS queue depth
+- **Event Types**: `reservation.hold.created`, `reservation.confirmed`, `reservation.expired`, etc.
+
+### Data Consistency Patterns
+
+- **Reservation API**: Uses DynamoDB transactions and idempotency keys (5-min TTL)
+- **Inventory API**: DynamoDB conditional updates prevent overselling
+- **Cross-service**: Event-driven eventual consistency
+
+### Performance & Resilience
+
+- **Circuit Breakers**: Resilience4j patterns in reservation-api
+- **Timeouts**: 250ms for gRPC calls, 600ms max for API responses
+- **Caching**: Caffeine cache for reservation-api, Redis for gateway
+- **Rate Limiting**: Gateway-level traffic control
+- **Health Checks**: Actuator endpoints and Prometheus metrics
+
+### Observability Stack
+
+- **Tracing**: OpenTelemetry with distributed trace correlation
+- **Metrics**: Prometheus with business metrics (reservation status, gRPC performance)
+- **Logging**: Structured JSON logs with trace IDs
+- **Monitoring**: Custom dashboards for 30k RPS performance targets
+
+### Security Implementation
+
+- **Authentication**: JWT OIDC tokens across all services
+- **Authorization**: Spring Security in reservation-api
+- **Idempotency**: UUID-based request deduplication
+- **Secrets**: Environment variable configuration, no hardcoded credentials
+
+## Service Integration Points
+
+### API Communication Flow
+1. **Frontend** → **Gateway**: HTTP/REST requests + WebSocket connections
+   - **Reservation Web** → **Gateway**: User interactions, real-time updates
+2. **Gateway** → **Layer 2 Services**: Authenticated and routed requests
+   - **Gateway** → **Reservation**: HTTP/REST with JWT forwarding
+   - **Gateway** → **Payment Sim**: HTTP/REST for direct payment operations
+3. **Inter-Service Communication (Layer 2 - gRPC)**:
+   - **Gateway** → **Reservation**: gRPC calls (CreateReservation, GetReservation, ConfirmReservation, CancelReservation)
+   - **Gateway** → **Payment Sim**: gRPC calls (CreatePaymentIntent, GetPaymentIntent, ProcessPayment)
+   - **Reservation** → **Inventory**: gRPC calls (CheckAvailability, CommitReservation, ReleaseHold)
+   - **Reservation** → **Payment Sim**: gRPC calls (CreatePaymentIntent, ConfirmPayment)
+4. **Event Flow**: Reservation publishes events via EventBridge → SQS → Reservation Worker processing
+5. **Real-time Updates**: Gateway → Frontend via WebSocket for queue status, reservation updates
+
+### gRPC Proto Management
+
+**Current Implementation:**
+- ✅ **Reservation** ↔ **Inventory**: `inventory.proto` (CheckAvailability, CommitReservation, ReleaseHold)
+
+**Required gRPC Services:**
+- ❌ **Gateway** ↔ **Reservation**: `reservation.proto` (CreateReservation, GetReservation, ConfirmReservation, CancelReservation)
+- ❌ **Gateway** ↔ **Payment Sim**: `payment.proto` (CreatePaymentIntent, GetPaymentIntent, ProcessPayment)
+- ❌ **Reservation** ↔ **Payment Sim**: `payment.proto` (CreatePaymentIntent, ConfirmPayment)
+
+**Proto Generation Commands:**
+- **Reservation API**: `./generate_proto.sh`
+- **Inventory API**: `make generate`
+- **Gateway API**: `make generate` (needs proto setup)
+- **Payment Sim API**: `make generate` (needs proto setup)
+
+**Proto File Locations:**
+- `reservation-api/src/main/proto/` (Kotlin client)
+- `inventory-api/proto/` (Go server)
+- `gateway-api/proto/` (Go client - needs creation)
+- `payment-sim-api/proto/` (Go server - needs creation)
+
+### Database Schema Patterns
+- **DynamoDB Tables**: `reservations`, `orders`, `idempotency`, `outbox` (reservation-api)
+- **Inventory Tables**: `inventory`, `inventory_seats` with optimistic locking
+- **Composite Keys**: PK/SK patterns for efficient queries and relationships
+
+## Performance Targets
+
+- **Throughput**: 30k RPS system-wide
+- **Latency**: P95 < 120ms (excluding payment confirmation)
+- **Error Rate**: < 1%
+- **Availability**: 99.9% target
+- **Reservation Hold**: 60-second automatic expiry
+
+## Independent Service Deployment
+
+Each service is designed for **independent deployment** with its own:
+
+- **Git Repository**: Separate repositories in production
+- **Dockerfile**: Container build and deployment
+- **CI/CD Pipeline**: Independent build, test, and deployment
+- **Configuration**: Service-specific environment variables and config files
+
+### Docker Build Per Service
+
+Each service includes its own Dockerfile for containerized deployment:
+
+```bash
+# Reservation API
+cd reservation-api && docker build -t reservation-api:latest .
+
+# Inventory API
+cd inventory-api && docker build -t inventory-api:latest .
+
+# Payment Sim API
+cd payment-sim-api && docker build -t payment-sim-api:latest .
+
+# Gateway API
+cd gateway-api && docker build -t gateway-api:latest .
+```
+
+## Local Development Setup
+
+### All Services Environment (Recommended)
+
+Use the **master local development script** to run all 4 services together:
+
+**Quick Start:**
+```bash
+# Start all services with infrastructure
+./run_local_all.sh start
+
+# Test connections between services
+./test_connections.sh test
+
+# Stop all services
+./run_local_all.sh stop
+```
+
+**AWS Environment Setup:**
+For local development, services use LocalStack for AWS simulation. For production or AWS integration testing:
+
+```bash
+# Discover and configure actual AWS resources
+./discover_aws_resources.sh generate
+
+# Set AWS credentials (if not using IAM roles)
+export AWS_REGION=ap-northeast-2
+export AWS_PROFILE=your-profile
+
+# Apply generated .env files to service configurations
+# (Generated files will be in aws_config_YYYYMMDD_HHMMSS/ directory)
+```
+
+**Service Ports:**
+- **Gateway API**: `http://localhost:8000` (Entry point)
+- **Reservation API**: `http://localhost:8001` (Business logic)
+- **Inventory API**: `grpc://localhost:8002` (High-performance gRPC)
+- **Payment Sim API**: `http://localhost:8003` (Payment simulation)
+
+**Infrastructure Ports:**
+- **LocalStack**: `http://localhost:4566` (AWS services simulation)
+- **OTEL Collector**: `4317` (gRPC), `4318` (HTTP)
+- **Prometheus**: `http://localhost:4090` (metrics collection)
+- **DynamoDB**: Uses AWS DynamoDB in ap-northeast-2 region (no local port)
+
+### Individual Service Development
+
+Each service can also be developed independently:
+
+**Prerequisites**: Docker, Docker Compose, Java 17+, Go 1.24+
+
+**Reservation API (Most Complete Environment):**
+```bash
+cd reservation-api && ./run_local.sh start
+```
+
+**Other Services:**
+```bash
+# Build and run individually
+cd [service-name]
+make build && ./[service-name]  # For Go services
+./gradlew bootRun              # For reservation-api
+```
+
+### Connection Testing
+
+The `test_connections.sh` script provides comprehensive connectivity testing:
+
+```bash
+# Test all service connections (HTTP + gRPC)
+./test_connections.sh test
+
+# Test specific service
+./test_connections.sh test gateway
+
+# Test gRPC connections specifically
+./test_connections.sh grpc
+
+# Show all service endpoints
+./test_connections.sh endpoints
+```
+
+**gRPC Connection Testing:**
+```bash
+# Test inventory gRPC (currently working)
+grpcurl -plaintext localhost:8002 list
+
+# Test reservation gRPC (needs implementation)
+grpcurl -plaintext localhost:8001 list
+
+# Test payment gRPC (needs implementation)
+grpcurl -plaintext localhost:8003 list
+```
+
+### Development Workflow
+
+1. **Start Environment**: `./run_local_all.sh start`
+2. **Verify Connections**: `./test_connections.sh test`
+3. **Run Integrated Tests**: `./test_all_integrated.sh quick`
+4. **Development**: Edit code, services auto-restart or manual restart
+5. **Health Monitoring**: `./health_check.sh monitor`
+6. **Full Test Suite**: `./test_all_integrated.sh full`
+7. **Stop Environment**: `./run_local_all.sh stop`
+
+## Integrated Testing Suite
+
+The platform includes comprehensive testing tools that orchestrate all components together:
+
+### Master Test Orchestration (`test_all_integrated.sh`)
+
+**Complete Test Suite:**
+```bash
+# Full integration test suite (all components)
+./test_all_integrated.sh full
+
+# Quick smoke tests (faster validation)
+./test_all_integrated.sh quick
+
+# Component-specific testing
+./test_all_integrated.sh backend
+./test_all_integrated.sh frontend
+./test_all_integrated.sh worker
+./test_all_integrated.sh integration
+./test_all_integrated.sh performance
+```
+
+**Advanced Options:**
+```bash
+# Parallel testing for faster execution
+./test_all_integrated.sh full --parallel
+
+# Custom timeout settings
+./test_all_integrated.sh backend --timeout 600
+
+# Skip cleanup for debugging
+./test_all_integrated.sh quick --no-cleanup
+```
+
+### Test Phases & Coverage
+
+**Phase 1: Prerequisites**
+- ✅ Tool availability (Docker, Node.js, Go, Java)
+- ✅ Port availability check
+- ✅ Environment validation
+
+**Phase 2: Infrastructure**
+- ✅ DynamoDB Local startup
+- ✅ LocalStack (AWS services simulation)
+- ✅ OTEL Collector, Prometheus setup
+- ✅ Table creation and configuration
+
+**Phase 3: Service Building**
+- ✅ Backend services compilation (Go, Kotlin)
+- ✅ Frontend build process (React/Vite)
+- ✅ Parallel building support
+- ✅ Build artifact validation
+
+**Phase 4: Service Startup**
+- ✅ Sequential service startup with dependencies
+- ✅ Health check waiting and validation
+- ✅ Port binding verification
+- ✅ Process monitoring
+
+**Phase 5: Connection Testing**
+- ✅ HTTP endpoint validation
+- ✅ gRPC service connectivity
+- ✅ Database accessibility
+- ✅ Inter-service communication paths
+
+**Phase 6: Worker Testing**
+- ✅ SQS queue setup and management
+- ✅ Event generation and processing
+- ✅ KEDA auto-scaling simulation
+- ✅ Background job lifecycle
+
+**Phase 7: Frontend Testing**
+- ✅ React development server startup
+- ✅ Unit tests (Jest + React Testing Library)
+- ✅ Type checking (TypeScript)
+- ✅ Linting and code quality
+- ✅ Production build verification
+- ✅ API connectivity testing
+
+**Phase 8: Integration Testing**
+- ✅ End-to-end reservation flow
+- ✅ Cross-service data consistency
+- ✅ Event-driven architecture validation
+- ✅ Real-time features testing
+
+**Phase 9: Performance Testing**
+- ✅ Load testing for each service
+- ✅ Resource usage monitoring
+- ✅ Response time validation
+- ✅ Concurrent request handling
+
+### Component-Specific Testing
+
+**Backend Services Testing:**
+```bash
+# Test individual backend components
+./test_connections.sh test gateway
+./test_connections.sh test reservation
+./test_connections.sh grpc
+
+# gRPC-specific testing
+grpcurl -plaintext localhost:8002 list
+grpcurl -plaintext localhost:8002 inventory.v1.Inventory/CheckAvailability
+```
+
+**Frontend Testing:**
+```bash
+# Complete frontend test suite
+./test_frontend.sh full-test
+
+# Development workflow
+./test_frontend.sh setup
+./test_frontend.sh dev
+
+# Individual test types
+./test_frontend.sh unit
+./test_frontend.sh lint
+./test_frontend.sh type-check
+./test_frontend.sh build
+./test_frontend.sh api-test
+./test_frontend.sh e2e
+```
+
+**Worker Testing:**
+```bash
+# Worker functionality testing
+./test_worker_local.sh setup
+./test_worker_local.sh load 10
+./test_worker_local.sh keda
+
+# Monitor worker processing
+./test_worker_local.sh monitor
+```
+
+### Health Monitoring (`health_check.sh`)
+
+**Real-time Health Monitoring:**
+```bash
+# Single health check
+./health_check.sh check
+
+# Continuous monitoring
+./health_check.sh monitor
+
+# Quick status summary
+./health_check.sh summary
+
+# System resources only
+./health_check.sh resources
+
+# Process status only
+./health_check.sh processes
+```
+
+**Health Check Features:**
+- 🔍 **Service Availability**: HTTP/gRPC endpoint validation
+- 📊 **Performance Metrics**: Response times, resource usage
+- 🚨 **Alert System**: Consecutive failure detection
+- 📈 **Resource Monitoring**: CPU, memory, disk usage
+- 🔄 **Process Monitoring**: Service PID tracking and health
+
+### Test Results & Reporting
+
+**Comprehensive Test Reports:**
+- ✅ **Test Coverage**: Pass/fail status for all components
+- ⏱️ **Performance Metrics**: Execution times per test phase
+- 📋 **Detailed Logging**: Component-specific test results
+- 🎯 **Success Rate**: Overall platform health percentage
+- 🚨 **Failure Analysis**: Specific failure points and diagnostics
+
+**Example Test Output:**
+```
+=== Test Report Summary ===
+Total Tests: 45
+Passed: 43
+Failed: 2
+Success Rate: 95%
+
+Detailed Results:
+  Infrastructure Startup           ✓ PASS  (12s)
+  Backend Service Build           ✓ PASS  (45s)
+  Frontend Build                  ✓ PASS  (32s)
+  Service Connectivity            ✓ PASS  (8s)
+  gRPC Communication              ✓ PASS  (5s)
+  Worker Processing               ✗ FAIL  (15s)
+  E2E Integration                 ✓ PASS  (20s)
+  Performance Validation          ✗ FAIL  (30s)
+```
+
+### Debugging & Troubleshooting
+
+**When Tests Fail:**
+1. **Check Logs**: `tail -f logs/[service-name].log`
+2. **Manual Service Check**: `./test_connections.sh test [service]`
+3. **Health Status**: `./health_check.sh check`
+4. **Resource Issues**: `./health_check.sh resources`
+5. **Process Status**: `./health_check.sh processes`
+
+**Common Issues & Solutions:**
+- **Port Conflicts**: Use `--no-cleanup` to debug, check `lsof -i :8000-8003` or `lsof -i :3000,4090,4566`
+- **Build Failures**: Check service-specific build logs
+- **Connection Issues**: Verify service startup order and dependencies
+- **Resource Constraints**: Monitor memory/CPU usage during tests
+- **Timeout Issues**: Increase timeout with `--timeout` option
+
+### Reservation Worker Local Testing
+
+The **reservation-worker** is a Kubernetes Job with KEDA auto-scaling, which requires a different local testing approach:
+
+**Testing Strategies:**
+
+1. **Standalone Mode** (Recommended for Development):
+   ```bash
+   # Run worker as a regular Go/Kotlin application
+   cd reservation-worker
+   go run cmd/worker/main.go --mode=standalone
+   # OR for Kotlin
+   ./gradlew bootRun --args="--mode=standalone"
+   ```
+
+2. **SQS Simulation Mode**:
+   ```bash
+   # Use LocalStack SQS with polling simulation
+   cd reservation-worker
+   export SQS_QUEUE_URL=http://localhost:4566/000000000000/reservation-events
+   go run cmd/worker/main.go --mode=sqs-local
+   ```
+
+3. **Docker Job Simulation**:
+   ```bash
+   # Simulate K8s job behavior locally
+   docker run --rm --network host \
+     -e SQS_QUEUE_URL=http://localhost:4566/000000000000/reservation-events \
+     -e AWS_REGION=ap-northeast-2 \
+     reservation-worker:latest
+   ```
+
+4. **Local Kubernetes with KEDA** (Advanced):
+   ```bash
+   # Requires: kind/minikube + KEDA installation
+   kind create cluster --name traffic-tacos
+   kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.12.0/keda-2.12.0.yaml
+   kubectl apply -f k8s/reservation-worker-job.yaml
+   ```
+
+**Event Testing:**
+```bash
+# Trigger worker events via reservation API
+curl -X POST http://localhost:8001/v1/reservations \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"event_id": "test", "qty": 1}'
+
+# Monitor worker processing
+tail -f logs/reservation-worker.log
+```
+
+**Queue Monitoring:**
+```bash
+# Check SQS queue depth (triggers KEDA scaling)
+aws sqs get-queue-attributes \
+  --queue-url http://localhost:4566/000000000000/reservation-events \
+  --attribute-names ApproximateNumberOfMessages \
+  --endpoint-url http://localhost:4566
+```
+
+**Key Differences from Web Services:**
+- **Event-driven**: Triggered by SQS messages, not HTTP requests
+- **Batch processing**: Processes multiple reservations per job run
+- **Auto-scaling**: KEDA scales based on queue depth (0-N pods)
+- **Stateless**: Each job run is independent
+- **No persistent server**: Starts, processes, and terminates
+
+### Frontend (Reservation Web) Local Development
+
+The **reservation-web** is a React frontend that requires a different development approach from backend services:
+
+**Development Setup:**
+```bash
+cd reservation-web
+
+# Install dependencies
+npm install
+# OR
+yarn install
+
+# Start development server
+npm run dev
+# OR
+yarn dev
+
+# Build for production
+npm run build
+# OR
+yarn build
+```
+
+**Frontend-Specific Development:**
+1. **Development Server**: Runs on port 3000 with hot reload
+2. **API Integration**: Connects to Gateway API on port 8080
+3. **Real-time Features**: WebSocket connection for live updates
+4. **State Management**: React state + Context API or Redux Toolkit
+5. **Routing**: React Router for SPA navigation
+
+**Testing Approaches:**
+
+1. **Standalone Development** (Frontend Only):
+   ```bash
+   cd reservation-web
+   npm run dev
+   # Access: http://localhost:3000
+   # Uses mock data or external API
+   ```
+
+2. **Full Stack Development** (Recommended):
+   ```bash
+   # Terminal 1: Start backend services
+   ./run_local_all.sh start
+
+   # Terminal 2: Start frontend
+   cd reservation-web && npm run dev
+   ```
+
+3. **Docker Development**:
+   ```bash
+   # Build frontend Docker image
+   cd reservation-web && docker build -t reservation-web:latest .
+
+   # Run with backend services
+   docker run -p 3000:3000 --network host reservation-web:latest
+   ```
+
+**Frontend Testing:**
+```bash
+cd reservation-web
+
+# Unit tests (Jest + React Testing Library)
+npm run test
+
+# E2E tests (Cypress or Playwright)
+npm run test:e2e
+
+# Visual testing (Storybook)
+npm run storybook
+
+# Lint and type check
+npm run lint
+npm run type-check
+```
+
+**API Integration Configuration:**
+```javascript
+// Environment variables for API endpoints
+VITE_API_BASE_URL=http://localhost:8000
+VITE_WS_URL=ws://localhost:8000/ws
+VITE_APP_ENV=development
+```
+
+**Key Differences from Backend Services:**
+- **Client-side rendering**: Runs in browser, not server
+- **Hot reload**: Instant updates during development
+- **Build process**: Transpilation and bundling required
+- **Static serving**: Final build serves static files
+- **Browser debugging**: DevTools instead of server logs
+- **CORS considerations**: Cross-origin requests to backend
+
+
+## Reservation-web 이 실제로 호출하는 API
+
+#### 대기열 관리
+- `POST /api/v1/queue/join` - 대기열 참여
+- `GET /api/v1/queue/status` - 상태 조회
+- `POST /api/v1/queue/enter` - 입장 요청
+- `DELETE /api/v1/queue/leave` - 대기열 이탈
+
+#### 예약 관리
+- `GET /api/v1/events/{id}/availability` - 가용성 조회
+- `POST /api/v1/reservations` - 예약 생성
+- `GET /api/v1/reservations/{id}` - 예약 조회
+- `POST /api/v1/reservations/{id}/confirm` - 예약 확정
+- `DELETE /api/v1/reservations/{id}` - 예약 취소
+
+#### 결제 처리
+- `POST /api/v1/payments/intent` - 결제 인텐트 생성
+- `POST /api/v1/payments/process` - 결제 처리
+- `GET /api/v1/payments/{id}/status` - 결제 상태 조회
+
+## 각 API 상세
+
+대기열 관리
+
+POST /api/v1/queue/join
+- 경로: Browser → (REST) gateway-api → (내부 큐 모듈/캐시; 필요 시 Redis 사용)
+- 상세: JWT(선택) 확인 → 대기열 토큰 생성 → 캐시에 등록 → 토큰 반환
+- 응답: {"waiting_token": "...", "position_hint": ...}
+
+GET /api/v1/queue/status?token=...
+- 경로: Browser → (REST) gateway-api → (내부 큐 상태 조회; Redis)
+- 상세: 토큰 유효성/ETA 계산(캐시) → 상태 반환
+- 응답: {"status":"waiting|ready|expired","eta_sec":...}
+
+POST /api/v1/queue/enter
+- 경로: Browser → (REST) gateway-api → (내부 검증/발급)
+- 상세: waiting_token 검증 → reservation_token 발급(캐시)
+- 응답: {"admission":"granted","reservation_token":"...","ttl_sec":...}
+
+DELETE /api/v1/queue/leave
+- 경로: Browser → (REST) gateway-api → (내부 큐 상태 변경; Redis)
+- 상세: 토큰 무효화/정리 → OK 반환
+
+⸻
+
+예약 관리
+
+GET /api/v1/events/{id}/availability
+- 경로: Browser → (REST) gateway-api → (gRPC) inventory-svc.Inventory/CheckAvailability
+- 상세: gateway가 {event_id, qty? seat_ids?}로 gRPC 호출 → 가용/불가 좌석 목록 수신 → REST로 변환해 응답
+
+POST /api/v1/reservations
+- 헤더: Idempotency-Key: <uuid> (필수), Authorization: Bearer <JWT>
+- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations → (gRPC) inventory-svc.Commit/Check (서비스 내부 플로우)
+- 상세: gateway는 인증/레이트리밋/멱등키 검증만 하고 reservation-api로 전달.
+reservation-api는 멱등 처리 + 60s 만료 스케줄(EventBridge Scheduler) 등록 + 필요 시 inventory 가용성 확인 후 HOLD 기록.
+
+GET /api/v1/reservations/{id}
+- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/{id}
+- 상세: 상태/HOLD 만료 시각 등 조회를 reservation-api에서 가져와 그대로 반환.
+
+POST /api/v1/reservations/{id}/confirm
+- 헤더: Idempotency-Key: <uuid> (권장)
+- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/confirm → (gRPC) inventory-svc.CommitReservation
+- 상세: reservation-api가 결제 승인 여부 확인(웹훅/이벤트 기준) 후 inventory CommitReservation 호출 → 확정/주문 생성 → 결과 반환.
+
+DELETE /api/v1/reservations/{id}
+- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/cancel → (gRPC) inventory-svc.ReleaseHold
+- 상세: reservation-api가 ReleaseHold 호출로 재고 복구 → 상태 CANCELLED로 갱신 후 응답.
+
+⸻
+
+결제 처리
+
+POST /api/v1/payments/intent
+- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/intent
+- 상세: 결제 시나리오(approve|fail|delay|random)와 webhook_url(reservation-api 내부 웹훅)을 전달.
+payment-sim-api는 지연 후 웹훅(REST POST) → reservation-api /internal/payment/webhook 호출.
+
+POST /api/v1/payments/process
+- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/webhook/test (또는 process API)
+- 상세: 수동 트리거/즉시 처리용(테스트용) 요청을 payment-sim-api로 전달 → payment-sim-api가 웹훅을 reservation-api에 발송.
+
+GET /api/v1/payments/{id}/status
+- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/intents/{id}
+- 상세: payment-sim-api가 보유한 intent 상태(PENDING|APPROVED|FAILED)를 조회해 반환.
+
+⸻
+
+보조 흐름(백그라운드/이벤트)
+- 예약 만료(60s): reservation-api가 생성 시 EventBridge Scheduler에 만료 이벤트 등록 → 만료 시 reservation-api 내부 핸들러(또는 SQS → reservation-worker)가 inventory-svc.ReleaseHold와 상태 EXPIRED 갱신 수행.
+- 결제 웹훅: payment-sim-api → (REST) reservation-api /internal/payment/webhook → reservation-api가 상태 갱신/확정 트리거 → 필요 시 (gRPC) inventory-svc.CommitReservation.
+- Worker 소비: reservation-worker는 SQS에서 reservation.expired|payment.approved|payment.failed 이벤트를 읽어 inventory-svc gRPC와 reservation-api REST를 호출(autoscale은 KEDA).
+
+## reservation-worker가 필요한 순간
+
+1. 예약 만료 처리 (60초 Hold Expiry)
+- 유저가 좌석을 선택하면 → reservation-api가 DynamoDB에 HOLD 상태로 저장 + EventBridge Scheduler(60s 후) 등록
+- 60초 뒤 EventBridge → SQS 이벤트 발행
+- reservation-worker가 이 SQS 이벤트를 소비해서:
+- inventory-svc에 gRPC ReleaseHold → 좌석/재고 복구
+- reservation-api REST /internal/reservations/{id} PATCH → 상태 EXPIRED로 변경
+
+👉 없으면, 만료된 예약이 DB에 계속 HOLD로 남아서 오버셀 발생 위험.
+
+⸻
+
+2. 결제 결과 후속 처리
+- payment-sim-api가 webhook으로 reservation-api에 “승인/실패” 이벤트 전달
+- reservation-api는 이벤트를 SQS에 Outbox 형태로 발행 (event type: payment.approved / payment.failed)
+- reservation-worker가 이 이벤트를 소비해서:
+- payment.approved → inventory-svc CommitReservation → 좌석 상태 SOLD 확정
+- payment.failed → inventory-svc ReleaseHold + reservation-api 상태 CANCELLED
+
+👉 없으면, 결제는 성공했는데 좌석 확정이 안 되거나, 결제가 실패했는데 좌석이 풀리지 않는 문제 발생.
+
+⸻
+
+3. 장애/보상 처리
+- 예약 중간에 Downstream 에러가 나면 reservation-api는 SQS로 보상 이벤트를 발행할 수 있음
+- worker가 이를 받아 재시도/보상 트랜잭션 수행 (e.g., 좌석 강제 복구, 예약 강제 취소)
