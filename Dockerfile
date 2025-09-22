@@ -53,11 +53,11 @@ RUN chown -R appuser:appgroup /app
 USER appuser
 
 # Expose ports
-EXPOSE 8080 8081
+EXPOSE 8020 8021
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:8081/health || exit 1
+    CMD wget --quiet --tries=1 --spider http://localhost:8021/health || exit 1
 
 # Command to run
 CMD ["./inventory-api"]

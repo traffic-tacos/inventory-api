@@ -43,7 +43,7 @@ This is the **Traffic Tacos MSA (Microservices Architecture) Platform** - a high
         Layer 2: Business Services        │
      ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
      │ Reservation API │ │  Inventory API  │ │ Payment Sim API │
-     │ (Kotlin/Spring) │ │   (Go/gRPC)     │ │   (Go/Echo)     │
+     │ (Kotlin/Spring) │ │   (Go/gRPC)     │ │   (Go/gRPC)     │
      └─────────┬───────┘ └─────────────────┘ └─────────────────┘
                │
                │ Events (EventBridge/SQS)
@@ -64,7 +64,7 @@ This is the **Traffic Tacos MSA (Microservices Architecture) Platform** - a high
 - **Layer 2 - Business Services**:
   - **reservation-api**: Core reservation management with 60s hold periods and event publishing (Kotlin + Spring Boot WebFlux)
   - **inventory-api**: High-performance inventory management with zero oversell guarantee (Go + gRPC)
-  - **payment-sim-api**: Payment processing simulator with webhook support (Go + Echo)
+  - **payment-sim-api**: Payment processing simulator with EventBridge + webhook support (Go + gRPC)
 - **Layer 3 - Background Processing**:
   - **reservation-worker**: Event-driven Kubernetes job with KEDA auto-scaling for reservation expiry and cleanup tasks
 
@@ -194,7 +194,7 @@ docker build -t gateway-api:latest .
 | 1 | Gateway | Go + Fiber | Redis | HTTP + JWT | Authentication, Routing, Rate limiting |
 | 2 | Reservation | Kotlin + Spring WebFlux | DynamoDB | REST + gRPC | Reactive, Event sourcing |
 | 2 | Inventory | Go + gRPC | DynamoDB | gRPC | High performance, Zero oversell |
-| 2 | Payment Sim | Go + Echo | In-memory | REST + Webhooks | External API simulation |
+| 2 | Payment Sim | Go + gRPC | In-memory | gRPC + EventBridge + Webhooks | External API simulation |
 | 3 | Reservation Worker | Go/Kotlin | DynamoDB | SQS + Events | K8s Job, KEDA scaling, Background processing |
 
 ### Event-Driven Architecture
@@ -250,27 +250,33 @@ docker build -t gateway-api:latest .
 4. **Event Flow**: Reservation publishes events via EventBridge → SQS → Reservation Worker processing
 5. **Real-time Updates**: Gateway → Frontend via WebSocket for queue status, reservation updates
 
-### gRPC Proto Management
+### Traffic Tacos Proto-Contracts 통합
 
-**Current Implementation:**
-- ✅ **Reservation** ↔ **Inventory**: `inventory.proto` (CheckAvailability, CommitReservation, ReleaseHold)
+**현재 구현 상태:**
+- ✅ **Reservation API**: Traffic Tacos proto-contracts 구조 적용 완료
+  - `common/v1/common.proto`: 공통 타입 정의 (ErrorCode, Money, Seat)
+  - `reservation/v1/inventory.proto`: InventoryService 정의
+  - `reservation/v1/reservation.proto`: ReservationService 정의
+- ✅ **Payment Sim API**: 중앙화된 `github.com/traffic-tacos/proto-contracts` 모듈 사용
+- ✅ **Reservation** → **Inventory**: gRPC 통신 (CheckAvailability, HoldSeats, CommitReservation, ReleaseHold)
+- ✅ **Reservation API gRPC Server**: 포트 8011에서 ReservationService 제공
 
-**Required gRPC Services:**
-- ❌ **Gateway** ↔ **Reservation**: `reservation.proto` (CreateReservation, GetReservation, ConfirmReservation, CancelReservation)
-- ❌ **Gateway** ↔ **Payment Sim**: `payment.proto` (CreatePaymentIntent, GetPaymentIntent, ProcessPayment)
-- ❌ **Reservation** ↔ **Payment Sim**: `payment.proto` (CreatePaymentIntent, ConfirmPayment)
+**필요한 gRPC 서비스 구현:**
+- ❌ **Gateway** → **Reservation**: `reservation.proto` gRPC 클라이언트 필요
+- ❌ **Inventory API**: Traffic Tacos proto-contracts 구조로 마이그레이션 필요
+- ✅ **Payment Sim API**: proto-contracts 모듈 사용 중
 
-**Proto Generation Commands:**
-- **Reservation API**: `./generate_proto.sh`
-- **Inventory API**: `make generate`
-- **Gateway API**: `make generate` (needs proto setup)
-- **Payment Sim API**: `make generate` (needs proto setup)
+**Proto 생성 명령어:**
+- **Reservation API**: `./generate_proto.sh` (Traffic Tacos 구조)
+- **Inventory API**: `make generate` (기존 구조, 마이그레이션 필요)
+- **Gateway API**: `make generate` (proto 설정 필요)
+- **Payment Sim API**: proto-contracts 모듈 사용 (로컬 생성 불필요)
 
-**Proto File Locations:**
-- `reservation-api/src/main/proto/` (Kotlin client)
-- `inventory-api/proto/` (Go server)
-- `gateway-api/proto/` (Go client - needs creation)
-- `payment-sim-api/proto/` (Go server - needs creation)
+**Proto 파일 위치:**
+- `reservation-api/src/main/proto/` (Traffic Tacos 구조: common/v1, reservation/v1)
+- `inventory-api/proto/` (Go 서버, 기존 구조)
+- `gateway-api/proto/` (Go 클라이언트, 생성 필요)
+- `payment-sim-api/` proto-contracts 모듈 사용
 
 ### Database Schema Patterns
 - **DynamoDB Tables**: `reservations`, `orders`, `idempotency`, `outbox` (reservation-api)
@@ -345,11 +351,12 @@ export AWS_PROFILE=your-profile
 # (Generated files will be in aws_config_YYYYMMDD_HHMMSS/ directory)
 ```
 
-**Service Ports:**
-- **Gateway API**: `http://localhost:8000` (Entry point)
-- **Reservation API**: `http://localhost:8001` (Business logic)
-- **Inventory API**: `grpc://localhost:8002` (High-performance gRPC)
-- **Payment Sim API**: `http://localhost:8003` (Payment simulation)
+**Traffic Tacos MSA 포트 할당:**
+- **Gateway API**: `http://localhost:8000` (REST), `grpc://localhost:8001` (gRPC Server)
+- **Reservation API**: `http://localhost:8010` (REST), `grpc://localhost:8011` (gRPC Server)
+- **Inventory API**: `http://localhost:8020` (REST), `grpc://localhost:8021` (gRPC Server)
+- **Payment Sim API**: `http://localhost:8030` (REST), `grpc://localhost:8031` (gRPC Server)
+- **Reservation Worker**: `http://localhost:8040` (REST), `grpc://localhost:8041` (gRPC Server)
 
 **Infrastructure Ports:**
 - **LocalStack**: `http://localhost:4566` (AWS services simulation)
@@ -397,13 +404,13 @@ The `test_connections.sh` script provides comprehensive connectivity testing:
 **gRPC Connection Testing:**
 ```bash
 # Test inventory gRPC (currently working)
-grpcurl -plaintext localhost:8002 list
+grpcurl -plaintext localhost:8021 list
 
-# Test reservation gRPC (needs implementation)
-grpcurl -plaintext localhost:8001 list
+# Test reservation gRPC (Traffic Tacos proto-contracts)
+grpcurl -plaintext localhost:8011 list
 
-# Test payment gRPC (needs implementation)
-grpcurl -plaintext localhost:8003 list
+# Test payment gRPC (working - pure gRPC service)
+grpcurl -plaintext localhost:8031 list
 ```
 
 ### Development Workflow
@@ -517,8 +524,8 @@ The platform includes comprehensive testing tools that orchestrate all component
 ./test_connections.sh grpc
 
 # gRPC-specific testing
-grpcurl -plaintext localhost:8002 list
-grpcurl -plaintext localhost:8002 inventory.v1.Inventory/CheckAvailability
+grpcurl -plaintext localhost:8021 list  # Inventory
+grpcurl -plaintext localhost:8021 inventory.v1.Inventory/CheckAvailability
 ```
 
 **Frontend Testing:**
@@ -615,7 +622,7 @@ Detailed Results:
 5. **Process Status**: `./health_check.sh processes`
 
 **Common Issues & Solutions:**
-- **Port Conflicts**: Use `--no-cleanup` to debug, check `lsof -i :8000-8003` or `lsof -i :3000,4090,4566`
+- **Port Conflicts**: Use `--no-cleanup` to debug, check `lsof -i :8000-8040` or `lsof -i :3000,4090,4566`
 - **Build Failures**: Check service-specific build logs
 - **Connection Issues**: Verify service startup order and dependencies
 - **Resource Constraints**: Monitor memory/CPU usage during tests
@@ -664,7 +671,7 @@ The **reservation-worker** is a Kubernetes Job with KEDA auto-scaling, which req
 **Event Testing:**
 ```bash
 # Trigger worker events via reservation API
-curl -X POST http://localhost:8001/v1/reservations \
+curl -X POST http://localhost:8010/v1/reservations \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
   -d '{"event_id": "test", "qty": 1}'
@@ -769,8 +776,9 @@ npm run type-check
 **API Integration Configuration:**
 ```javascript
 // Environment variables for API endpoints
-VITE_API_BASE_URL=http://localhost:8000
-VITE_WS_URL=ws://localhost:8000/ws
+VITE_API_BASE_URL=http://localhost:8000      // Gateway API (Entry point)
+VITE_WS_URL=ws://localhost:8000/ws          // WebSocket for real-time updates
+VITE_RESERVATION_API=http://localhost:8010  // Direct reservation API (optional)
 VITE_APP_ENV=development
 ```
 
@@ -836,21 +844,21 @@ GET /api/v1/events/{id}/availability
 
 POST /api/v1/reservations
 - 헤더: Idempotency-Key: <uuid> (필수), Authorization: Bearer <JWT>
-- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations → (gRPC) inventory-svc.Commit/Check (서비스 내부 플로우)
+- 경로: Browser → (REST) gateway-api:8000 → (REST) reservation-api:8010 /v1/reservations → (gRPC) inventory-svc:8021.Commit/Check
 - 상세: gateway는 인증/레이트리밋/멱등키 검증만 하고 reservation-api로 전달.
 reservation-api는 멱등 처리 + 60s 만료 스케줄(EventBridge Scheduler) 등록 + 필요 시 inventory 가용성 확인 후 HOLD 기록.
 
 GET /api/v1/reservations/{id}
-- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/{id}
+- 경로: Browser → (REST) gateway-api:8000 → (REST) reservation-api:8010 /v1/reservations/{id}
 - 상세: 상태/HOLD 만료 시각 등 조회를 reservation-api에서 가져와 그대로 반환.
 
 POST /api/v1/reservations/{id}/confirm
 - 헤더: Idempotency-Key: <uuid> (권장)
-- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/confirm → (gRPC) inventory-svc.CommitReservation
+- 경로: Browser → (REST) gateway-api:8000 → (REST) reservation-api:8010 /v1/reservations/confirm → (gRPC) inventory-svc:8021.CommitReservation
 - 상세: reservation-api가 결제 승인 여부 확인(웹훅/이벤트 기준) 후 inventory CommitReservation 호출 → 확정/주문 생성 → 결과 반환.
 
 DELETE /api/v1/reservations/{id}
-- 경로: Browser → (REST) gateway-api → (REST) reservation-api /v1/reservations/cancel → (gRPC) inventory-svc.ReleaseHold
+- 경로: Browser → (REST) gateway-api:8000 → (REST) reservation-api:8010 /v1/reservations/cancel → (gRPC) inventory-svc:8021.ReleaseHold
 - 상세: reservation-api가 ReleaseHold 호출로 재고 복구 → 상태 CANCELLED로 갱신 후 응답.
 
 ⸻
@@ -858,17 +866,17 @@ DELETE /api/v1/reservations/{id}
 결제 처리
 
 POST /api/v1/payments/intent
-- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/intent
-- 상세: 결제 시나리오(approve|fail|delay|random)와 webhook_url(reservation-api 내부 웹훅)을 전달.
-payment-sim-api는 지연 후 웹훅(REST POST) → reservation-api /internal/payment/webhook 호출.
+- 경로: Browser → (REST) gateway-api:8000 → (gRPC) payment-sim-api:8031 payment.v1.PaymentService/CreatePaymentIntent
+- 상세: 결제 시나리오(PAYMENT_SCENARIO_APPROVE|FAIL|DELAY|RANDOM)와 webhook_url(reservation-api:8010 내부 웹훅)을 전달.
+payment-sim-api는 지연 후 웹훅(REST POST) + EventBridge 이벤트 발행 → reservation-api:8010 처리.
 
 POST /api/v1/payments/process
-- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/webhook/test (또는 process API)
-- 상세: 수동 트리거/즉시 처리용(테스트용) 요청을 payment-sim-api로 전달 → payment-sim-api가 웹훅을 reservation-api에 발송.
+- 경로: Browser → (REST) gateway-api:8000 → (gRPC) payment-sim-api:8031 payment.v1.PaymentService/ProcessPayment
+- 상세: 수동 트리거/즉시 처리용(테스트용) 요청을 payment-sim-api로 전달 → payment-sim-api가 웹훅 + EventBridge를 reservation-api:8010에 발송.
 
 GET /api/v1/payments/{id}/status
-- 경로: Browser → (REST) gateway-api → (REST) payment-sim-api /v1/sim/intents/{id}
-- 상세: payment-sim-api가 보유한 intent 상태(PENDING|APPROVED|FAILED)를 조회해 반환.
+- 경로: Browser → (REST) gateway-api:8000 → (gRPC) payment-sim-api:8031 payment.v1.PaymentService/GetPaymentStatus
+- 상세: payment-sim-api가 보유한 intent 상태(PAYMENT_STATUS_PENDING|COMPLETED|FAILED)를 조회해 반환.
 
 ⸻
 
@@ -883,8 +891,8 @@ GET /api/v1/payments/{id}/status
 - 유저가 좌석을 선택하면 → reservation-api가 DynamoDB에 HOLD 상태로 저장 + EventBridge Scheduler(60s 후) 등록
 - 60초 뒤 EventBridge → SQS 이벤트 발행
 - reservation-worker가 이 SQS 이벤트를 소비해서:
-- inventory-svc에 gRPC ReleaseHold → 좌석/재고 복구
-- reservation-api REST /internal/reservations/{id} PATCH → 상태 EXPIRED로 변경
+- inventory-svc:8021에 gRPC ReleaseHold → 좌석/재고 복구
+- reservation-api:8010 REST /internal/reservations/{id} PATCH → 상태 EXPIRED로 변경
 
 👉 없으면, 만료된 예약이 DB에 계속 HOLD로 남아서 오버셀 발생 위험.
 
@@ -894,8 +902,8 @@ GET /api/v1/payments/{id}/status
 - payment-sim-api가 webhook으로 reservation-api에 “승인/실패” 이벤트 전달
 - reservation-api는 이벤트를 SQS에 Outbox 형태로 발행 (event type: payment.approved / payment.failed)
 - reservation-worker가 이 이벤트를 소비해서:
-- payment.approved → inventory-svc CommitReservation → 좌석 상태 SOLD 확정
-- payment.failed → inventory-svc ReleaseHold + reservation-api 상태 CANCELLED
+- payment.approved → inventory-svc:8021 CommitReservation → 좌석 상태 SOLD 확정
+- payment.failed → inventory-svc:8021 ReleaseHold + reservation-api:8010 상태 CANCELLED
 
 👉 없으면, 결제는 성공했는데 좌석 확정이 안 되거나, 결제가 실패했는데 좌석이 풀리지 않는 문제 발생.
 

@@ -105,12 +105,12 @@ func startMetricsServer(logger *observability.Logger) {
 	mux.HandleFunc("/health", healthCheck)
 
 	server := &http.Server{
-		Addr:    ":8081",
+		Addr:    ":8021",
 		Handler: mux,
 	}
 
 	logger.Info("Starting metrics server",
-		observability.StringField("port", "8081"),
+		observability.StringField("port", "8021"),
 		observability.StringField("endpoints", "/metrics, /health"),
 	)
 

@@ -5,272 +5,573 @@ alwaysApply: true
 
 # Infrastructure as Code (IaC) 구성
 
-## 🎯 IaC 목표
-Traffic Tacos 프로젝트의 AWS 인프라를 Terraform으로 관리하는 완전 자동화된 IaC 시스템
+## 아키텍처 개요
 
-## 🏗️ 아키텍처 설계
+이 프로젝트는 AWS 기반의 3-tier 아키텍처를 구성하며, 마이크로서비스 패턴을 지원합니다:
 
-### 네트워크 토폴로지
-```
-VPC (10.180.0.0/20)
-├── Public Tier (10.180.0.0/26, 10.180.0.64/26)
-│   ├── ALB/NLB (외부 트래픽 진입)
-│   ├── Bastion Host (관리용)
-│   └── NAT Gateway (Private 아웃바운드)
-│
-├── Private App Tier (10.180.1.0/25, 10.180.1.128/25)
-│   ├── EKS 노드 그룹
-│   ├── API Gateway 파드
-│   └── Application 파드들
-│
-└── Private DB Tier (10.180.2.0/26, 10.180.2.64/26)
-    ├── RDS Aurora (데이터베이스)
-    ├── ElastiCache Redis (캐시)
-    └── DynamoDB VPC 엔드포인트
-```
+- **Public Tier**: 인터넷 게이트웨이를 통한 외부 접근이 가능한 서브넷
+- **Private App Tier**: 애플리케이션 서버를 위한 프라이빗 서브넷 (NAT 게이트웨이 통해 인터넷 접근)
+- **Private DB Tier**: 데이터베이스 서버를 위한 격리된 프라이빗 서브넷
 
-## 📁 프로젝트 구조
+### 서비스 아키텍처
 
-```
-terraform/
-├── main.tf                    # 메인 리소스 정의
-├── providers.tf              # 프로바이더 설정
-├── backend.tf                # S3 백엔드 설정
-├── variables.tf              # 입력 변수
-├── outputs.tf                # 출력 값
-├── terraform.tfvars         # 변수 값 (환경별)
+현재 다음 마이크로서비스를 지원합니다:
+
+- **Ticket Service**: 티켓팅 시스템 (DynamoDB + EventBridge)
+- **Reservation Service**: 예약 시스템 (DynamoDB + EventBridge + TTL 지원)
+
+## 지원되는 클라우드 프로바이더
+
+- **AWS**: 기본 인프라 프로비저닝
+- **Kubernetes**: 컨테이너 오케스트레이션
+- **Helm**: Kubernetes 패키지 관리
+
+## 프로젝트 구조
+
+```bash
+
+├── README.md                
+├── backend.tf               # Terraform 백엔드 설정 (S3)
+├── main.tf                  # 메인 Terraform 구성  
+├── providers.tf             # 프로바이더 설정
+├── var.tf                   # 전역 변수 정의
+├── docs/                    # 문서화
+│   ├── spec/               # 기술 스펙 문서
+│   │   ├── dynamodb-spec.md    # DynamoDB 스펙 문서
+│   │   └── eventbridge-spec.md # EventBridge 스펙 문서
+│   └── request/            # 요구사항 문서
+│       └── reservation-api-infrastructure-requirements.md
 └── modules/
-    ├── vpc/                  # VPC 네트워크 모듈
-    │   ├── main.tf          # VPC, 서브넷, 라우팅
-    │   ├── variables.tf     # VPC 설정 변수
-    │   ├── outputs.tf       # VPC 출력 값
-    │   └── README.md        # 모듈 설명
-    ├── eks/                  # EKS 클러스터 모듈
-    ├── rds/                  # RDS 데이터베이스 모듈
-    └── security/             # 보안 그룹 모듈
+    ├── awsgrafana/         # AWS Grafana 모듈
+    │   ├── awsgrafna.tf    # Grafana 리소스 정의
+    │   ├── iam.tf          # Grafana IAM 역할 및 정책
+    │   ├── sso.tf          # SSO 설정
+    │   └── var.tf          # Grafana 모듈 변수
+    ├── awsprometheus/         # AWS Prometheus 모듈
+    │   ├── awsprometheus.tf    # Prometheus 리소스 정의
+    │   └── var.tf          # Prometheus 모듈 변수
+    ├── ec2/                 # EC2 모듈
+    │   ├── ec2.tf          # EC2 인스턴스 리소스 정의
+    │   ├── out.tf          # EC2 모듈 출력
+    │   ├── sg.tf           # Security Group 정의
+    │   └── var.tf          # EC2 모듈 변수
+    ├── eks/                 # EKS 모듈
+    │   ├── eks.tf          # EKS 클러스터 리소스 정의
+    │   ├── iam.tf          # EKS IAM 역할 및 정책
+    │   ├── sg.tf           # EKS Security Group 정의
+    │   ├── gateway.tf      # AWS Gateway API 컨트롤러 및 ALB 설정
+    │   ├── outputs.tf      # EKS 모듈 출력
+    │   └── var.tf          # EKS 모듈 변수
+    ├── dynamodb/            # DynamoDB 모듈
+    │   ├── dynamodb.tf     # DynamoDB 테이블 리소스 정의
+    │   ├── iam.tf          # DynamoDB IAM 역할 및 정책
+    │   ├── out.tf          # DynamoDB 모듈 출력
+    │   └── var.tf          # DynamoDB 모듈 변수
+    ├── eventbridge/        # EventBridge 모듈
+    │   ├── eventbridge.tf  # EventBridge 리소스 정의
+    │   ├── iam.tf          # EventBridge IAM 역할 및 정책
+    │   ├── out.tf          # EventBridge 모듈 출력
+    │   └── var.tf          # EventBridge 모듈 변수
+    ├── rds/                 # RDS 모듈 (개발 예정)
+    ├── route53/             # Route53 DNS 모듈
+    │   ├── route53.tf      # Route53 Hosted Zone 및 DNS 레코드
+    │   ├── outputs.tf      # Route53 모듈 출력
+    │   └── var.tf          # Route53 모듈 변수
+    ├── acm/                 # ACM SSL 인증서 모듈
+    │   ├── acm.tf          # SSL 인증서 및 CloudFront용 인증서
+    │   ├── outputs.tf      # ACM 모듈 출력
+    │   └── var.tf          # ACM 모듈 변수
+    ├── s3-static/           # S3 정적 웹사이트 모듈
+    │   ├── s3.tf           # S3 버킷 및 정적 웹사이트 설정
+    │   ├── outputs.tf      # S3 모듈 출력
+    │   └── var.tf          # S3 모듈 변수
+    ├── cloudfront/          # CloudFront CDN 모듈
+    │   ├── cloudfront.tf   # CloudFront 배포 설정
+    │   ├── outputs.tf      # CloudFront 모듈 출력
+    │   └── var.tf          # CloudFront 모듈 변수
+    ├── elasticache/         # ElastiCache Redis 모듈
+    │   ├── elasticache.tf  # Redis 클러스터 및 설정
+    │   ├── outputs.tf      # ElastiCache 모듈 출력
+    │   └── var.tf          # ElastiCache 모듈 변수
+    ├── sqs/                 # SQS 모듈
+    │   ├── main.tf         # SQS 큐 및 DLQ 리소스 정의
+    │   ├── outputs.tf      # SQS 모듈 출력
+    │   └── var.tf          # SQS 모듈 변수
+    └── vpc/                 # VPC 모듈
+        ├── out.tf          # VPC 모듈 출력
+        ├── var.tf          # VPC 모듈 변수
+        └── vpc.tf          # VPC 리소스 정의
 ```
 
-## 🔧 주요 리소스 구성
+## 네트워크 구성
+
+### 기본 설정
+
+- **VPC CIDR**: 10.180.0.0/20
+- **리전**: ap-northeast-2 (서울)
+- **가용 영역**: ap-northeast-2a, ap-northeast-2c
+
+### 서브넷 구성
+
+| Tier | CIDR 범위 | 용도 |
+|------|-----------|------|
+| Public | 10.180.0.0/24, 10.180.1.0/24 | ALB, Bastion 호스트 |
+| Private App | 10.180.4.0/22, 10.180.8.0/22 | 애플리케이션 서버, EKS 노드 |
+| Private DB | 10.180.2.0/24, 10.180.3.0/24 | RDS, ElastiCache |
+
+### 네트워킹 기능
+
+- 인터넷 게이트웨이 (Public 서브넷 인터넷 접근)
+- NAT 게이트웨이 (Private 서브넷 아웃바운드 트래픽)
+- VPC 엔드포인트 (필요시 추가 예정)
+
+## 전제 조건
+
+- Terraform >= 1.5.0
+- AWS CLI 설정 및 인증
+- AWS 프로필 설정 (`tacos` 프로필 권장)
+
+## 초기 설정
+
+1. **AWS 프로필 설정**:
+
+   ```bash
+   aws configure --profile tacos
+   ```
+
+2. **Terraform 초기화**:
+
+   ```bash
+   terraform init
+   ```
+
+3. **워크스페이스 선택** (필요시):
+
+   ```bash
+   terraform workspace select <workspace> || terraform workspace new <workspace>
+   ```
+
+## 배포
+
+1. **계획 확인**:
+
+   ```bash
+   terraform plan
+   ```
+
+2. **인프라 배포**:
+
+   ```bash
+   terraform apply
+   ```
+
+3. **리소스 확인**:
+
+   ```bash
+   terraform output
+   ```
+
+## 모듈 설명
+
+### EKS 모듈 (`modules/eks/`)
+
+Kubernetes 클러스터와 관련 인프라를 프로비저닝합니다:
+
+- **EKS 클러스터**: Kubernetes 1.33 클러스터 및 3개 노드 그룹
+- **노드 그룹**:
+  - `ondemand-node-group`: 중요 워크로드용 (t3.large)
+  - `mix-node-group`: 일반 워크로드용 (t3.medium/large/xlarge)
+  - `monitoring-node-group`: 모니터링 전용 (t3.medium, taint 적용)
+- **EKS 애드온**:
+  - 기본: vpc-cni, kube-proxy, coredns, aws-ebs-csi-driver
+  - 모니터링: kube-state-metrics, metrics-server, eks-node-monitoring-agent
+  - 인증서: cert-manager
+  - 보안: eks-pod-identity-agent
+- **AWS Gateway API**: Kubernetes Gateway API 컨트롤러 및 ALB 통합 (Kubernetes 1.33에서는 비활성화)
+- **보안**: IAM 역할, 보안 그룹, VPC 엔드포인트
+- **네트워킹**: Private 서브넷 배치, 베스천 호스트 접근
+
+**주요 변수**:
+- `cluster_version`: Kubernetes 버전 (기본값: "1.33")
+- `private_subnet_ids`: EKS 노드가 배치될 프라이빗 서브넷
+- `eks_addons`: EKS 애드온 목록 (9개 애드온 포함)
+- `enable_gateway_api`: Gateway API 활성화 여부
+- `domain_name`: ALB에 연결할 도메인 이름
+- `acm_certificate_arn`: SSL 인증서 ARN
+- `ondemand_disk_size`: On-demand 노드 디스크 크기 (기본값: 50GB)
+- `mix_disk_size`: Mix 노드 디스크 크기 (기본값: 30GB)
+- `monitoring_disk_size`: 모니터링 노드 디스크 크기 (기본값: 30GB)
+
+### Route53 모듈 (`modules/route53/`)
+
+DNS 관리 및 도메인 설정을 제공합니다:
+
+- **Hosted Zone**: 기존 수동 생성된 호스팅 영역 참조
+- **DNS 레코드**: A 레코드 자동 생성 (www, api, bastion 서브도메인)
+- **SSL 인증서 검증**: ACM 인증서 DNS 검증 지원
+
+**주요 변수**:
+- `domain_name`: 관리할 도메인 이름
+- `project_name`: 리소스 태깅용 프로젝트 이름
+
+### ACM 모듈 (`modules/acm/`)
+
+SSL/TLS 인증서 관리를 제공합니다:
+
+- **지역별 인증서**: 서울 리전 및 us-east-1 (CloudFront용) 인증서
+- **와일드카드 지원**: 메인 도메인 및 서브도메인 (api, www, *) 포함
+- **DNS 검증**: Route53을 통한 자동 검증
+
+**주요 변수**:
+- `domain_name`: 메인 도메인 이름
+- `subject_alternative_names`: 추가 도메인 목록
+
+### S3 정적 웹사이트 모듈 (`modules/s3-static/`)
+
+정적 웹사이트 호스팅을 위한 S3 버킷을 프로비저닝합니다:
+
+- **S3 버킷**: 정적 웹사이트 호스팅 설정
+- **CORS 설정**: CloudFront 통합을 위한 CORS 정책
+- **보안**: 퍼블릭 액세스 차단, CloudFront OAC 통합
+
+**주요 변수**:
+- `bucket_name`: S3 버킷 이름
+- `cors_allowed_origins`: CORS 허용 오리진 목록
+
+### CloudFront 모듈 (`modules/cloudfront/`)
+
+글로벌 CDN 배포를 프로비저닝합니다:
+
+- **CDN 배포**: S3 정적 웹사이트용 CloudFront 배포
+- **SSL 인증서**: ACM 인증서 통합
+- **도메인 별칭**: 커스텀 도메인 (www) 지원
+- **OAC**: Origin Access Control을 통한 S3 보안 접근
+
+**주요 변수**:
+- `domain_name`: 메인 도메인 이름
+- `aliases`: CloudFront 별칭 도메인 목록
+- `acm_certificate_arn`: SSL 인증서 ARN
+
+### ElastiCache 모듈 (`modules/elasticache/`)
+
+Redis 클러스터를 프로비저닝합니다:
+
+- **Redis 클러스터**: ElastiCache Redis 복제 그룹
+- **보안**: VPC 내 배치, 암호화 지원 (전송 중/미사용)
+- **고가용성**: Multi-AZ 배포, 자동 장애 조치
+- **인증**: AUTH 토큰 기반 보안
+
+**주요 변수**:
+- `cluster_name`: Redis 클러스터 이름
+- `node_type`: Redis 노드 타입 (예: cache.t3.micro)
+- `num_cache_clusters`: 클러스터 노드 수
+- `at_rest_encryption_enabled`: 미사용 데이터 암호화
+- `transit_encryption_enabled`: 전송 중 데이터 암호화
+
+### SQS 모듈 (`modules/sqs/`)
+
+결제 웹훅 처리를 위한 SQS 큐 인프라를 프로비저닝합니다:
+
+- **메인 큐**: 결제 웹훅 메시지 처리용 SQS 큐
+- **DLQ**: 실패한 메시지 보관을 위한 Dead Letter Queue
+- **보안**: KMS 암호화 및 IAM 역할 기반 접근 제어
+- **신뢰성**: 재시도 정책 및 메시지 가시성 타임아웃 설정
+
+**주요 변수**:
+- `queue_name`: SQS 큐 이름 (기본값: "payment-webhooks")
+- `visibility_timeout_seconds`: 메시지 가시성 타임아웃
+- `max_receive_count`: DLQ 이동 전 최대 재시도 횟수
+- `enable_dlq`: Dead Letter Queue 활성화 여부
+- `enable_encryption`: KMS 암호화 활성화 여부
 
 ### VPC 모듈 (`modules/vpc/`)
-```hcl
-# 입력 변수
-variable "vpc_cidr" {
-  description = "VPC CIDR 블록"
-  type        = string
-  default     = "10.180.0.0/20"
-}
 
-variable "azs" {
-  description = "가용 영역 목록"
-  type        = list(string)
-  default     = ["ap-northeast-2a", "ap-northeast-2c"]
-}
+완전한 VPC 인프라를 프로비저닝합니다:
 
-# 출력 값
-output "vpc_id" {
-  description = "VPC ID"
-  value       = aws_vpc.main.id
-}
+- VPC, 서브넷 (Public/Private), 라우팅 테이블
+- 인터넷 게이트웨이 및 NAT 게이트웨이
+- 보안 그룹 및 네트워크 ACL
+- Kubernetes 태그 지원
 
-output "public_subnet_ids" {
-  description = "Public 서브넷 ID 목록"
-  value       = aws_subnet.public[*].id
-}
-```
+**입력 변수**:
 
-### EKS 클러스터 구성
-- **버전**: 1.28+
-- **노드 그룹**: 관리형 노드 그룹
-- **인스턴스 타입**: m6g.large (Graviton2, ARM64)
-- **AutoScaling**: Karpenter 기반
-- **네트워킹**: Calico CNI
+- `vpc_cidr`: VPC CIDR 블록
+- `name`: 리소스 이름 접두사
+- `azs`: 가용 영역 목록
+- `public_cidrs`: Public 서브넷 CIDR 목록
+- `private_app_cidrs`: Private App 서브넷 CIDR 목록
+- `private_db_cidrs`: Private DB 서브넷 CIDR 목록
 
-### 보안 그룹 전략
-```hcl
-# ALB 보안 그룹
-resource "aws_security_group" "alb" {
-  name_prefix = "traffic-tacos-alb"
-  vpc_id      = aws_vpc.main.id
+### DynamoDB 모듈 (`modules/dynamodb/`)
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+마이크로서비스용 NoSQL 데이터베이스 인프라를 프로비저닝합니다:
 
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-```
+- **6개 DynamoDB 테이블**: 티켓 서비스(2개) + 예약 서비스(4개)
+- **IAM 역할**: 애플리케이션, 읽기 전용, 예약 API 전용 역할
+- **보안 기능**: Point-in-time 복구, 서버 측 암호화, TTL 지원
+- **모니터링**: CloudWatch 알람 (읽기/쓰기 스로틀링 감지)
 
-## 🚀 배포 워크플로우
+**배포된 테이블**:
+- `ticket-tickets`: 티켓 정보 (GSI 포함)
+- `ticket-ticket-events`: 티켓 이벤트 저장
+- `ticket-reservation-reservations`: 예약 정보 (GSI 포함)
+- `ticket-reservation-orders`: 주문 정보 (GSI 포함)
+- `ticket-reservation-idempotency`: 멱등성 보장 (TTL 활성화)
+- `ticket-reservation-outbox`: 아웃박스 패턴 이벤트
 
-### 1. 초기화
+**주요 변수**:
+- `tables`: 테이블 구성 목록 (속성, GSI, TTL 설정)
+- `name`: 리소스 접두사 (기본값: "ticket")
+
+### EventBridge 모듈 (`modules/eventbridge/`)
+
+마이크로서비스 간 이벤트 기반 통신을 위한 EventBridge 인프라를 프로비저닝합니다:
+
+- **2개 이벤트 버스**: 티켓 서비스 + 예약 서비스 (도메인별 분리)
+- **8개 이벤트 규칙**: 티켓(2개) + 예약(3개) + 스케줄러(1개) 이벤트 처리
+- **DLQ & 아카이브**: 실패 이벤트 처리 및 이력 보관
+- **IAM 역할**: 서비스 및 타겟 호출을 위한 권한 관리
+
+**배포된 이벤트 버스**:
+- `ticket-ticket-events`: 티켓 서비스 이벤트
+- `ticket-reservation-events`: 예약 서비스 이벤트
+
+**주요 이벤트 규칙**:
+- 티켓: 생성, 상태 변경
+- 예약: 생성, 상태 변경, 만료 스케줄러
+
+**주요 변수**:
+- `custom_bus_name`: 기본 이벤트 버스 이름
+- `additional_buses`: 추가 이벤트 버스 목록
+- `rules`: 이벤트 규칙 및 타겟 구성
+- `enable_dlq`: DLQ 활성화 (기본값: true)
+
+### AWS Grafana 모듈 (`modules/awsgrafana/`)
+
+AWS Managed Grafana 서비스를 프로비저닝합니다:
+
+- **Grafana 워크스페이스**: AWS Managed Grafana 인스턴스
+- **SSO 통합**: AWS IAM Identity Center (기존 AWS SSO) 연동
+- **IAM 역할**: Grafana 서비스 역할 및 권한 관리
+- **데이터 소스**: Prometheus, CloudWatch 등 통합 지원
+
+**주요 변수**:
+- `grafana_name`: Grafana 워크스페이스 이름
+
+### AWS Prometheus 모듈 (`modules/awsprometheus/`)
+
+AWS Managed Prometheus 서비스를 프로비저닝합니다:
+
+- **Prometheus 워크스페이스**: AWS Managed Prometheus 인스턴스
+- **메트릭 수집**: EKS 클러스터 및 애플리케이션 메트릭
+- **보안**: VPC 내 보안 접근 및 IAM 기반 인증
+- **Grafana 통합**: AWS Grafana와의 데이터 소스 연동
+
+### RDS 모듈 (`modules/rds/`)
+
+개발 예정 기능:
+
+- Aurora MySQL 클러스터
+- RDS 서브넷 그룹
+- 보안 그룹 및 파라미터 그룹
+- 모니터링 및 백업 설정
+
+## 태그 정책
+
+모든 리소스는 다음과 같은 태그를 포함합니다:
+-  `Project` : ticket-traffic
+- `ManagedBy`: Terraform
+- 추가 사용자 정의 태그
+
+## 보안 고려사항
+
+- Private 서브넷은 인터넷 직접 접근 불가
+- NAT 게이트웨이를 통한 아웃바운드 트래픽만 허용
+- 보안 그룹을 통한 세부적인 트래픽 제어
+- VPC 엔드포인트를 통한 AWS 서비스 접근 (추후 구현)
+
+## 모니터링 및 로깅
+
+- AWS CloudTrail을 통한 API 호출 로깅
+- VPC Flow Logs를 통한 네트워크 트래픽 로깅
+- CloudWatch를 통한 메트릭 및 알람
+
+## 개발자 가이드
+
+### 새로운 모듈 추가
+
+1. `modules/` 디렉토리에 새 모듈 디렉토리 생성
+2. `main.tf`, `var.tf`, `out.tf` 파일 생성
+3. `main.tf`에서 모듈 호출
+4. README.md 작성
+
+### 코드 포맷팅
+
 ```bash
-# Terraform 초기화
-terraform init
-
-# 워크스페이스 생성
-terraform workspace select dev || terraform workspace new dev
-```
-
-### 2. 계획 및 검증
-```bash
-# 변경사항 계획
-terraform plan -var-file="dev.tfvars"
-
-# 코드 포맷팅
 terraform fmt -recursive
+```
 
-# 유효성 검증
+### 유효성 검증
+
+```bash
 terraform validate
-```
+   ```
 
-### 3. 배포
+## 트러블슈팅
+
+### 일반적인 문제
+
+1. **백엔드 설정 오류**
+   - S3 버킷이 존재하는지 확인
+   - IAM 권한이 올바르게 설정되었는지 확인
+
+2. **리소스 생성 실패**
+   - AWS 서비스 제한 확인 (예: VPC 수 제한)
+   - 가용 영역별 리소스 할당량 확인
+
+3. **네트워크 연결 문제**
+   - 보안 그룹 규칙 확인
+   - 라우팅 테이블 설정 검증
+
+## 문서
+
+프로젝트의 상세한 스펙과 가이드는 `docs/` 폴더에서 확인할 수 있습니다:
+
+**기술 스펙 문서 (`docs/spec/`)**:
+- [DynamoDB 스펙](docs/spec/dynamodb-spec.md) - DynamoDB 테이블 설계 및 구성 가이드
+- [EventBridge 스펙](docs/spec/eventbridge-spec.md) - EventBridge 이벤트 아키텍처 가이드
+
+**요구사항 문서 (`docs/request/`)**:
+- [Reservation API 인프라 요구사항](docs/request/reservation-api-infrastructure-requirements.md) - 예약 시스템 인프라 요구사항
+
+## 배포된 인프라 현황
+
+### 🌐 네트워킹
 ```bash
-# 인프라 배포
-terraform apply -var-file="dev.tfvars"
+VPC                     # 10.180.0.0/20 CIDR
+├── Public Subnets     # 10.180.0.0/24, 10.180.1.0/24
+├── Private App        # 10.180.4.0/22, 10.180.8.0/22
+└── Private DB         # 10.180.2.0/24, 10.180.3.0/24
 
-# 출력 값 확인
-terraform output
+Internet Gateway       # Public 서브넷 인터넷 접근
+NAT Gateway           # Private 서브넷 아웃바운드
 ```
 
-### 4. 정리
+### ☸️ EKS 클러스터
 ```bash
-# 인프라 제거 (주의!)
-terraform destroy -var-file="dev.tfvars"
+EKS Cluster v1.33     # Kubernetes 클러스터
+├── 3개 노드 그룹      # 워크로드별 분리 배치
+│   ├── ondemand-node-group    # 중요 워크로드 (t3.large)
+│   ├── mix-node-group         # 일반 워크로드 (t3.medium/large/xlarge)
+│   └── monitoring-node-group  # 모니터링 전용 (t3.medium, taint)
+├── 9개 EKS 애드온    # 모니터링, 보안, 인증서 관리
+│   ├── 기본 애드온: vpc-cni, kube-proxy, coredns, aws-ebs-csi-driver
+│   ├── 모니터링: kube-state-metrics, metrics-server, eks-node-monitoring-agent
+│   ├── 보안: eks-pod-identity-agent
+│   └── 인증서: cert-manager
+├── Gateway API       # ALB 컨트롤러 통합 (v1.33에서 임시 비활성화)
+└── VPC Endpoints     # AWS 서비스 접근
 ```
 
-## 🔒 보안 고려사항
+### 🌍 DNS & SSL
+```bash
+Route53 Hosted Zone   # 도메인 관리
+├── api.domain        # EKS ALB 연결
+├── www.domain        # CloudFront 연결
+└── bastion.domain    # EC2 베스천 호스트
 
-### 네트워크 보안
-- **Private 서브넷**: 인터넷 직접 접근 불가
-- **NAT Gateway**: 아웃바운드 트래픽만 허용
-- **Security Group**: 최소 권한 원칙 적용
-- **VPC 엔드포인트**: AWS 서비스 프라이빗 연결
-
-### IAM 정책
-```hcl
-# IRSA 정책 예시
-data "aws_iam_policy_document" "gateway_api" {
-  statement {
-    actions = [
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
-      "dynamodb:Query"
-    ]
-    resources = [
-      aws_dynamodb_table.reservations.arn,
-      aws_dynamodb_table.orders.arn
-    ]
-  }
-}
+ACM Certificates      # SSL/TLS 인증서
+├── Seoul Region      # EKS ALB용
+└── us-east-1         # CloudFront용
 ```
 
-## 📊 모니터링 및 로깅
+### 🖥️ 정적 웹사이트
+```bash
+S3 Static Website     # 정적 파일 호스팅
+├── CORS 설정         # CloudFront 통합
+└── OAC 보안          # 직접 접근 차단
 
-### CloudWatch 구성
-- **VPC Flow Logs**: 네트워크 트래픽 로깅
-- **CloudTrail**: API 호출 감사
-- **X-Ray**: 애플리케이션 추적
-
-### 비용 모니터링
-- **Cost Allocation Tags**: 리소스별 비용 추적
-- **Budgets**: 예산 알림 설정
-- **RI/SP Coverage**: 예약 인스턴스 최적화
-
-## 🧪 테스트 전략
-
-### 단위 테스트
-```hcl
-# Terratest 예시
-func TestVpcCreation(t *testing.T) {
-  terraformOptions := &terraform.Options{
-    TerraformDir: "../examples/vpc",
-  }
-
-  defer terraform.Destroy(t, terraformOptions)
-  terraform.InitAndApply(t, terraformOptions)
-
-  vpcId := terraform.Output(t, terraformOptions, "vpc_id")
-  assert.NotEmpty(t, vpcId)
-}
+CloudFront CDN        # 글로벌 배포
+├── Custom Domain     # www.domain 별칭
+└── SSL 인증서        # HTTPS 지원
 ```
 
-### 통합 테스트
-- **Kitchen-Terraform**: IaC 통합 테스트
-- **AWS Config Rules**: 인프라 컴플라이언스 검증
-- **Prowler**: 보안 취약점 스캔
-
-## 🔄 CI/CD 파이프라인
-
-### GitHub Actions 워크플로우
-```yaml
-name: 'IaC CI/CD'
-on:
-  push:
-    branches: [main]
-    paths: ['terraform/**']
-
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - run: terraform fmt -check
-      - run: terraform validate
-
-  plan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - run: terraform plan
-
-  apply:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - run: terraform apply -auto-approve
+### 🗄️ DynamoDB 테이블 (6개)
+```bash
+ticket-tickets                    # 티켓 정보 (GSI1 포함)
+ticket-ticket-events             # 티켓 이벤트
+ticket-reservation-reservations  # 예약 정보 (GSI1 포함)
+ticket-reservation-orders        # 주문 정보 (GSI1 포함)
+ticket-reservation-idempotency   # 멱등성 테이블 (TTL 활성화)
+ticket-reservation-outbox        # 아웃박스 이벤트
 ```
 
-## 📋 체크리스트
+### 🚌 EventBridge 버스 (2개)
+```bash
+ticket-ticket-events      # 티켓 서비스 이벤트
+ticket-reservation-events # 예약 서비스 이벤트
+```
 
-### 필수 구성 요소
-- [ ] VPC 및 서브넷 생성
-- [ ] 인터넷 게이트웨이 및 NAT 게이트웨이
-- [ ] 보안 그룹 및 네트워크 ACL
-- [ ] EKS 클러스터 및 노드 그룹
-- [ ] RDS Aurora 클러스터
-- [ ] ElastiCache Redis 클러스터
-- [ ] S3 백엔드 및 잠금 테이블
+### 🗃️ ElastiCache Redis
+```bash
+Redis Cluster         # 캐시 및 세션 스토어
+├── Multi-AZ         # 고가용성 설정
+├── Encryption       # 전송/저장 암호화
+└── AUTH Token       # 보안 인증
+```
 
-### 보안 강화
-- [ ] IRSA 설정 및 IAM 역할
-- [ ] VPC 엔드포인트 구성
-- [ ] CloudTrail 및 Config 활성화
-- [ ] 보안 그룹 최소 권한 적용
+### 📤 SQS 큐
+```bash
+Payment Webhook Queue        # 결제 웹훅 메시지 처리
+├── Main Queue              # traffic-tacos-payment-webhooks
+├── Dead Letter Queue       # 실패 메시지 보관
+├── KMS Encryption         # 서버 사이드 암호화
+└── IAM Role & Policy      # 접근 권한 관리
+```
 
-### 모니터링
-- [ ] CloudWatch 대시보드
-- [ ] VPC Flow Logs 설정
-- [ ] Cost Allocation Tags
+### 📊 모니터링
+```bash
+AWS Managed Grafana   # 시각화 대시보드
+├── SSO 통합         # IAM Identity Center
+└── Prometheus 연동   # 메트릭 데이터 소스
 
-### 고가용성
-- [ ] Multi-AZ 배포
-- [ ] AutoScaling 그룹
-- [ ] 백업 및 복구 전략
+AWS Managed Prometheus # 메트릭 수집/저장
+├── EKS 통합         # 클러스터 메트릭
+└── 애플리케이션 메트릭 # 커스텀 메트릭
+```
 
----
+### 👤 IAM 역할
+```bash
+EKS 관련 역할:
+├── EKS Cluster Role     # 클러스터 서비스 역할
+├── EKS Node Group Role  # 노드 그룹 서비스 역할
+└── ALB Controller Role  # Gateway API 컨트롤러 역할
 
-*이 문서는 Traffic Tacos 프로젝트의 IaC 구성 및 배포 가이드입니다.*
+DynamoDB 관련 역할:
+├── Application Role     # 전체 DynamoDB 접근
+├── ReadOnly Role        # 읽기 전용 접근
+└── Reservation API Role # 예약 API 전용 역할
+
+EventBridge 관련 역할:
+├── Service Role         # EventBridge 서비스 역할
+└── Target Role          # EventBridge 타겟 역할
+
+모니터링 관련 역할:
+├── Grafana Service Role # Grafana 워크스페이스 역할
+└── Prometheus Role      # 메트릭 수집 역할
+
+SQS 관련 역할:
+├── SQS Access Role      # 큐 접근 권한
+└── SQS Policy          # 메시지 송수신 정책
+```
+
+## 기여 가이드
+
+1. Fork 및 브랜치 생성
+2. 변경사항 구현
+3. 테스트 및 유효성 검증
+4. Pull Request 생성
+
+## 라이선스
+
+이 프로젝트는 Traffic Tacos 팀의 내부 사용을 위한 프로젝트입니다.

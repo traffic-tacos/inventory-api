@@ -38,7 +38,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		// Server
-		GRPCPort: getEnv("GRPC_PORT", "50051"),
+		GRPCPort: getEnv("GRPC_PORT", "8020"),
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
 		// AWS

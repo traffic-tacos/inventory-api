@@ -19,9 +19,10 @@ alwaysApply: true
 - gRPC + protobuf (`google.golang.org/grpc`, `google.golang.org/protobuf`)
 - DynamoDB AWS SDK v2 (`github.com/aws/aws-sdk-go-v2/*`)
 - 관측: OpenTelemetry(OTLP), Prometheus(client_golang)
-- 로깅: zap(JSON 구조 로그)
-- 검증: go-playground/validator 또는 자체 검증
+- 로깅: 구조화된 JSON 로그 (내장 로거)
+- 검증: 자체 검증 (gRPC 인터셉터)
 - 복원력(클라이언트 X, 서버 관점): 컨텍스트 데드라인 준수, idempotency 처리
+- Proto Contracts: 중앙화된 proto-contracts 리포지토리 사용
 
 ## 2) 도메인/저장소 모델 (DynamoDB)
 테이블 설계(단순·핵심 위주):
@@ -48,63 +49,21 @@ alwaysApply: true
 - **멱등성 키**: `reservation_id` 기준으로 **idempotent** 보장(같은 요청은 같은 결과 반환).
   - 서버는 `reservation_id` 처리 기록을 짧은 TTL 캐시(로컬 LRU 또는 DynamoDB item)로 유지.
 
-## 3) gRPC 계약(.proto) — 생성물에 포함
+## 3) gRPC 계약(.proto) — proto-contracts 리포지토리에서 관리
 
-syntax = “proto3”;
-package inventory.v1;
+현재 구현된 서비스는 proto-contracts 리포지토리의 reservation.v1.InventoryService를 사용:
 
-option go_package = “github.com/traffictacos/inventory-api/genproto/inventory/v1;inventoryv1”;
-
-service Inventory {
-// 재고 가용성 간단 확인(선택적)
-rpc CheckAvailability(CheckReq) returns (CheckRes);
-
-// 예약 확정(재고 감소/좌석 확정) - 오버셀 0%를 보장해야 함
-rpc CommitReservation(CommitReq) returns (CommitRes);
-
-// 홀드/가용성 복원
-rpc ReleaseHold(ReleaseReq) returns (ReleaseRes);
+```protobuf
+service InventoryService {
+  rpc CheckAvailability(CheckAvailabilityRequest) returns (CheckAvailabilityResponse);
+  rpc CommitReservation(CommitReservationRequest) returns (CommitReservationResponse);
+  rpc ReleaseHold(ReleaseHoldRequest) returns (ReleaseHoldResponse);
 }
+```
 
-message SeatRef {
-string seat_id = 1;
-}
-
-message CheckReq {
-string event_id = 1;
-// qty가 0보다 크면 수량형, seat_ids가 비어있지 않으면 좌석형. 둘 다 오면 좌석형 우선.
-int32 qty = 2;
-repeated SeatRef seat_ids = 3;
-}
-
-message CheckRes {
-bool available = 1;
-repeated string unavailable_seats = 2;
-}
-
-message CommitReq {
-string reservation_id = 1;
-string event_id = 2;
-int32 qty = 3;
-repeated SeatRef seat_ids = 4;
-string payment_intent_id = 5;
-}
-
-message CommitRes {
-string order_id = 1;
-string status = 2; // “CONFIRMED”
-}
-
-message ReleaseReq {
-string reservation_id = 1;
-string event_id = 2;
-int32 qty = 3;
-repeated SeatRef seat_ids = 4;
-}
-
-message ReleaseRes {
-string status = 1; // “RELEASED”
-}
+- 패키지: `reservation.v1` (proto-contracts에서 정의됨)
+- 생성된 코드: `github.com/traffic-tacos/proto-contracts/gen/go/reservation/v1`
+- 로컬 생성: `go mod download` 후 자동으로 사용 가능
 
 ## 4) 서버 동작(핵심 로직 요구)
 - **CheckAvailability**:
@@ -157,7 +116,7 @@ string status = 1; // “RELEASED”
   - `IDEMPOTENCY_TTL_SECONDS=300`
   - `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317`
   - `LOG_LEVEL=info`
-- 서버 포트: `GRPC_PORT=8080` (env)
+- 서버 포트: `GRPC_PORT=8020` (gRPC 서비스), 메트릭/헬스체크: `8021`
 
 ## 9) 테스트/품질(코드 중심)
 - 단위: 트랜잭션 빌더/조건식 생성/멱등 처리 로직 테스트
@@ -167,22 +126,31 @@ string status = 1; // “RELEASED”
   - 목표: Commit 500–800 rps 구간에서 p95<40ms 유지
 - 계약: `.proto`가 단일 진실원천 → 생성 코드와 서버/클라 컴파일 확인
 
-## 10) 산출물(리포 구조)
-- `/cmd/inventory-api/main.go`
-- `/internal/server/` (gRPC 서버, 인터셉터, 오류 매핑)
-- `/internal/service/` (도메인 로직: commit/release/check, 멱등)
-- `/internal/repo/` (DynamoDB 접근: 조건식/트랜잭션 빌더)
-- `/internal/observability/` (otel, prometheus, logger)
-- `/internal/config/` (env 파서, 기본값)
-- `/proto/inventory.proto` (+ `make generate` 스크립트)
-- `/tests/` (unit + integration with LocalStack)
-- `Makefile` (lint/test/build/generate), `Dockerfile`(멀티스테이지, arm64), `README.md`
+## 10) 산출물(리포 구조) - 현재 구현 상태
+- `/cmd/inventory-api/main.go` ✅ 구현됨
+- `/internal/server/` ✅ gRPC 서버, 인터셉터, 오류 매핑 구현
+- `/internal/service/` ✅ 비즈니스 로직: commit/release/check, 멱등 구현
+- `/internal/repo/` ✅ DynamoDB 접근: 조건식/트랜잭션 빌더 구현
+- `/internal/observability/` ✅ OpenTelemetry, Prometheus, 구조화 로거 구현
+- `/internal/config/` ✅ 환경변수 파서, 기본값 구현
+- **Proto**: proto-contracts 리포지토리 사용 (중앙화됨)
+- `/tests/` ✅ 단위 테스트 및 통합 테스트 구현
+- `Makefile` ✅ 빌드/테스트/생성 스크립트
+- `Dockerfile` ✅ 멀티스테이지, arm64 지원
+- `README.md` ✅ 상세한 문서화
 
 ## 11) 추가 요구(선택적 기능 플래그)
 - `INVENTORY_MODE=quantity|seat` : 수량/좌석 모드 선택
 - 좌석형에서 **HOLD→SOLD 이동**을 하나의 TransactWrite로 커버(원자성 보장)
 - 수량형에서 **version(Optimistic Lock)** 을 사용한 방어도 켜고 끌 수 있게
 
-### 최종 지시
-위 명세에 따라 inventory-api의 **애플리케이션 코드/프로토/도메인/테스트/관측**을 생성하세요.
-인프라/배포 스펙(K8s/Helm/IaC)은 포함하지 말고, 환경변수 키만 노출하며 값 주입은 외부에서 처리되도록 하세요.
+## 12) 포트 설정 (MSA 포트 할당)
+- **inventory-api**: `8020` (gRPC), `8021` (메트릭/헬스체크)
+- **gateway-api**: `8000`
+- **reservation-api**: `8010`
+- **payment-sim-api**: `8030`
+- **reservation-worker**: `8040`
+
+### 현재 상태
+inventory-api는 완전히 구현되어 있으며, proto-contracts 리포지토리와 통합되어 있습니다.
+모든 핵심 기능(재고 관리, 멱등성, 관측성)이 구현되어 있고, Docker 컨테이너로 실행 가능합니다.

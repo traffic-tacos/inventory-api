@@ -80,7 +80,7 @@ source .env.local && AWS_PROFILE=tacos ./bin/inventory-api
 go install github.com/fullstorydev/grpcui/cmd/grpcui@latest
 
 # 웹 인터페이스 실행
-grpcui -plaintext localhost:50051
+grpcui -plaintext localhost:8020
 ```
 
 ### Docker 실행
@@ -90,7 +90,7 @@ grpcui -plaintext localhost:50051
 make docker-build
 
 # 컨테이너 실행
-docker run -p 50051:50051 -p 8081:8081 \
+docker run -p 8020:8020 -p 8021:8021 \
   --env-file .env.local \
   localhost:5000/inventory-api:latest
 ```
@@ -114,7 +114,7 @@ service InventoryService {
 #### grpcui 사용 (추천)
 ```bash
 # 웹 인터페이스로 API 테스트
-grpcui -plaintext localhost:50051
+grpcui -plaintext localhost:8020
 # 브라우저에서 표시된 URL 접속
 ```
 
@@ -125,7 +125,7 @@ grpcui -plaintext localhost:50051
 grpcurl -plaintext -d '{
   "event_id": "test-event-1",
   "quantity": 2
-}' localhost:50051 reservation.v1.InventoryService/CheckAvailability
+}' localhost:8020 reservation.v1.InventoryService/CheckAvailability
 ```
 
 ##### 2. CommitReservation - 예약 확정
@@ -135,7 +135,7 @@ grpcurl -plaintext -d '{
   "event_id": "test-event-1",
   "quantity": 2,
   "payment_intent_id": "pay_xyz789"
-}' localhost:50051 reservation.v1.InventoryService/CommitReservation
+}' localhost:8020 reservation.v1.InventoryService/CommitReservation
 ```
 
 ##### 3. ReleaseHold - 홀드 해제
@@ -144,7 +144,7 @@ grpcurl -plaintext -d '{
   "reservation_id": "rsv_abc123",
   "event_id": "test-event-1",
   "quantity": 2
-}' localhost:50051 reservation.v1.InventoryService/ReleaseHold
+}' localhost:8020 reservation.v1.InventoryService/ReleaseHold
 ```
 
 ## 🗄️ 데이터베이스 스키마
@@ -192,7 +192,7 @@ grpcurl -plaintext -d '{
 
 ```bash
 # 서버 설정
-GRPC_PORT=50051
+GRPC_PORT=8020
 LOG_LEVEL=debug
 
 # AWS 설정
@@ -248,8 +248,8 @@ make load-test-ghz
 ## 📊 모니터링
 
 ### 메트릭 엔드포인트
-- **Prometheus**: `http://localhost:8081/metrics`
-- **Health Check**: `http://localhost:8081/health`
+- **Prometheus**: `http://localhost:8021/metrics`
+- **Health Check**: `http://localhost:8021/health`
 
 ### 주요 메트릭
 
