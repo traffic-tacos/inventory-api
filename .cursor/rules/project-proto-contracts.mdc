@@ -48,62 +48,158 @@ Traffic Tacos MSA Platform (30k RPS)
 go get github.com/traffic-tacos/proto-contracts@latest
 ```
 
-### 임포트
+### 의존성 (go.mod)
 ```go
-import (
-    gatewaypb "github.com/traffic-tacos/proto-contracts/gen/go/gateway/v1"
-    reservationpb "github.com/traffic-tacos/proto-contracts/gen/go/reservation/v1"
-    paymentpb "github.com/traffic-tacos/proto-contracts/gen/go/payment/v1"
-    commonpb "github.com/traffic-tacos/proto-contracts/gen/go/common/v1"
+module your-service
+
+go 1.23
+
+require (
+    github.com/traffic-tacos/proto-contracts v0.1.0
+    google.golang.org/grpc v1.75.1
+    google.golang.org/protobuf v1.36.6
 )
 ```
 
+### 임포트 (v1 패키지)
+```go
+import (
+    commonv1 "github.com/traffic-tacos/proto-contracts/gen/go/common/v1"
+    gatewayv1 "github.com/traffic-tacos/proto-contracts/gen/go/gateway/v1"
+    reservationv1 "github.com/traffic-tacos/proto-contracts/gen/go/reservation/v1"
+    paymentv1 "github.com/traffic-tacos/proto-contracts/gen/go/payment/v1"
+)
+```
+
+### 생성된 코드 통계
+- **Go 파일**: 20개 (gen/go/ 폴더)
+- **Java 파일**: 335개 (gen/java/ 폴더)
+- **지원 언어**: Go, Java, Kotlin
+
 ### 클라이언트 사용 예제
 ```go
-// Queue 클라이언트
-queueClient := gatewaypb.NewQueueServiceClient(conn)
-joinResp, err := queueClient.JoinQueue(ctx, &gatewaypb.JoinQueueRequest{
+// Queue 클라이언트 (업데이트된 v1 패키지)
+queueClient := gatewayv1.NewQueueServiceClient(conn)
+joinResp, err := queueClient.JoinQueue(ctx, &gatewayv1.JoinQueueRequest{
     EventId:   "evt_2025_concert",
     UserId:    "user_12345",
     SessionId: "session_abcdef",
 })
 
 // Reservation 클라이언트
-reservationClient := reservationpb.NewReservationServiceClient(conn)
-createResp, err := reservationClient.CreateReservation(ctx, &reservationpb.CreateReservationRequest{
+reservationClient := reservationv1.NewReservationServiceClient(conn)
+createResp, err := reservationClient.CreateReservation(ctx, &reservationv1.CreateReservationRequest{
     EventId:          "evt_2025_concert",
     SeatIds:          []string{"A-12", "A-13"},
     Quantity:         2,
     ReservationToken: joinResp.ReservationToken,
+    TotalAmount: &commonv1.Money{
+        Amount:   100000,
+        Currency: "KRW",
+    },
+})
+
+// Inventory 클라이언트
+inventoryClient := reservationv1.NewInventoryServiceClient(conn)
+invResp, err := inventoryClient.CheckAvailability(ctx, &reservationv1.CheckAvailabilityRequest{
+    EventId:  "evt_2025_concert",
+    Quantity: 2,
+    Section:  "VIP",
+})
+
+// Payment 클라이언트
+paymentClient := paymentv1.NewPaymentServiceClient(conn)
+paymentResp, err := paymentClient.CreatePaymentIntent(ctx, &paymentv1.CreatePaymentIntentRequest{
+    ReservationId: createResp.ReservationId,
+    UserId:       "user_12345",
+    Amount: &commonv1.Money{
+        Amount:   100000,
+        Currency: "KRW",
+    },
 })
 ```
 
 ### 서버 구현 예제
 ```go
 type queueServer struct {
-    gatewaypb.UnimplementedQueueServiceServer
+    gatewayv1.UnimplementedQueueServiceServer
 }
 
-func (s *queueServer) JoinQueue(ctx context.Context, req *gatewaypb.JoinQueueRequest) (*gatewaypb.JoinQueueResponse, error) {
+func (s *queueServer) JoinQueue(ctx context.Context, req *gatewayv1.JoinQueueRequest) (*gatewayv1.JoinQueueResponse, error) {
     // 대기열 로직 구현
-    return &gatewaypb.JoinQueueResponse{
+    return &gatewayv1.JoinQueueResponse{
         WaitingToken: generateToken(),
-        PositionHint: calculatePosition(req.EventId),
-        EtaSeconds:   estimateWaitTime(req.EventId),
-        Status:       gatewaypb.QueueStatus_QUEUE_STATUS_WAITING,
+        Position:     calculatePosition(req.EventId),
+        EstimatedWaitSeconds: estimateWaitTime(req.EventId),
+        QueueId:      generateQueueId(),
+        ExpiresAt:    timestamppb.New(time.Now().Add(time.Hour)),
+    }, nil
+}
+
+type inventoryServer struct {
+    reservationv1.UnimplementedInventoryServiceServer
+}
+
+func (s *inventoryServer) CheckAvailability(ctx context.Context, req *reservationv1.CheckAvailabilityRequest) (*reservationv1.CheckAvailabilityResponse, error) {
+    // 재고 확인 로직 (DynamoDB 조건부 업데이트)
+    return &reservationv1.CheckAvailabilityResponse{
+        Available: true,
+        AvailableSeats: []*commonv1.Seat{
+            {SeatId: "A-12", Section: "VIP", Price: &commonv1.Money{Amount: 50000, Currency: "KRW"}},
+            {SeatId: "A-13", Section: "VIP", Price: &commonv1.Money{Amount: 50000, Currency: "KRW"}},
+        },
+        RemainingInSection: 10,
     }, nil
 }
 ```
 
 ## Kotlin/Spring 사용법
 
-### Gradle 의존성
+### Gradle 의존성 (build.gradle.kts)
 ```kotlin
-dependencies {
-    implementation("com.traffic-tacos:proto-contracts:1.0.0")
-    implementation("io.grpc:grpc-kotlin-stub:1.3.0")
-    implementation("io.grpc:grpc-protobuf:1.58.0")
+plugins {
+    kotlin("jvm") version "2.1.0"
 }
+
+dependencies {
+    // Proto contracts
+    implementation("com.traffic-tacos:proto-contracts:1.0.0")
+
+    // gRPC dependencies (최신 버전)
+    implementation("io.grpc:grpc-kotlin-stub:1.4.3")
+    implementation("io.grpc:grpc-protobuf:1.69.0")
+    implementation("io.grpc:grpc-netty:1.69.0")
+
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+
+    // Spring Boot gRPC (선택사항)
+    implementation("net.devh:grpc-spring-boot-starter:2.15.0")
+}
+```
+
+### Maven 의존성 (pom.xml)
+```xml
+<dependencies>
+    <!-- Proto contracts -->
+    <dependency>
+        <groupId>com.traffic-tacos</groupId>
+        <artifactId>proto-contracts</artifactId>
+        <version>1.0.0</version>
+    </dependency>
+
+    <!-- gRPC dependencies -->
+    <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-kotlin-stub</artifactId>
+        <version>1.4.3</version>
+    </dependency>
+    <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-protobuf</artifactId>
+        <version>1.69.0</version>
+    </dependency>
+</dependencies>
 ```
 
 ### 클라이언트 사용 (Kotlin)
@@ -204,6 +300,62 @@ message Error {
 - `PAYMENT_FAILED`: 결제 실패
 - `SEAT_UNAVAILABLE`: 좌석 매진
 
+## 코드 생성 및 빌드
+
+### 사용 가능한 명령어
+```bash
+# 전체 코드 생성 (Go + Java/Kotlin)
+make generate
+
+# 언어별 개별 생성
+make generate-go      # Go 코드만 생성 (20개 파일)
+make generate-kotlin  # Java/Kotlin 코드만 생성 (335개 파일)
+
+# 코드 검증
+make lint            # Proto 파일 린트
+make breaking        # 호환성 체크 (vs main 브랜치)
+make test           # 생성된 코드 테스트
+make build          # 전체 빌드
+
+# 청소
+make clean          # 생성된 파일 모두 삭제
+```
+
+### 수동 생성 (buf 직접 사용)
+```bash
+# 모든 언어 코드 생성
+buf generate
+
+# Go 코드만 생성
+buf generate --template buf.gen.yaml --include-imports
+
+# 린트 및 검증
+buf lint
+buf format --diff --exit-code
+```
+
+### 생성된 파일 구조
+```
+proto-contracts/
+├── gen/go/           # Go 생성 코드 (20 파일)
+│   ├── common/v1/    # 공통 타입 (Money, Error, Seat 등)
+│   ├── gateway/v1/   # 게이트웨이 서비스
+│   ├── payment/v1/   # 결제 서비스
+│   └── reservation/v1/ # 예약/재고 서비스
+├── gen/java/         # Java/Kotlin 생성 코드 (335 파일)
+│   └── com/traffic_tacos/
+└── proto/            # 원본 proto 파일
+    ├── common/v1/
+    ├── gateway/v1/
+    ├── payment/v1/
+    └── reservation/v1/
+```
+
+### CI/CD 상태
+- ✅ **buf 코드 생성**: 모든 환경에서 작동
+- ✅ **Go 빌드**: CI에서 자동 검증
+- ⚠️ **Gradle 빌드**: 로컬에서만 사용 (CI에서는 buf만 사용)
+
 ## 개발 가이드라인
 
 ### Proto 파일 수정 시
@@ -211,6 +363,7 @@ message Error {
 2. `buf breaking` 실행하여 호환성 체크
 3. `make generate` 실행하여 코드 생성
 4. `make test` 실행하여 테스트
+5. 생성된 코드와 함께 커밋
 
 ### 버전 관리
 - 모든 proto 파일은 v1 네임스페이스 사용
@@ -223,14 +376,39 @@ message Error {
 - **InventoryService**: DynamoDB conditional update로 zero oversell 보장
 - **WorkerService**: KEDA auto-scaling으로 백그라운드 처리
 
-## 문서 및 예제
+## 문서 및 리소스
 
-- `docs/API_SPECIFICATION.md`: 전체 API 상세 스펙
-- `docs/INTEGRATION_GUIDE.md`: 서비스별 연동 가이드
-- `docs/MIGRATION_GUIDE.md`: 기존 서비스 마이그레이션 가이드
-- `examples/go/`: Go 클라이언트 예제
-- `examples/kotlin/`: Kotlin 서비스 예제
-- `examples/typescript/`: TypeScript 프론트엔드 예제
+### 주요 문서
+- **README.md**: 완전한 사용 가이드 (Go/Kotlin 예제 포함)
+  - Quick Start Guide (5분 만에 시작)
+  - 상세한 클라이언트/서버 구현 예제
+  - Maven/Gradle 설정 가이드
+  - grpcurl 테스트 방법
+- **buf.gen.yaml**: 코드 생성 설정
+- **Makefile**: 빌드 및 검증 명령어
+- **.github/workflows/ci.yml**: CI/CD 파이프라인
+
+### 생성된 예제 (스크립트 자동 생성)
+- `gen/go/integration_test.go`: Go 통합 테스트 (scripts/generate-go.sh 실행시)
+- `src/test/kotlin/`: Kotlin 통합 테스트 (로컬에서만, scripts/generate-kotlin.sh 실행시)
+
+### 개발 도구
+```bash
+# 프로젝트 상태 확인
+make status
+
+# 개발 환경 초기화
+make init
+
+# 의존성 설치
+make deps
+
+# 전체 개발 워크플로우
+make dev    # clean → generate → test
+
+# CI 워크플로우
+make ci     # lint → breaking → generate → test
+```
 
 ## 관련 저장소
 

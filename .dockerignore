@@ -1,0 +1,36 @@
+# Ignore development files
+.git
+.gitignore
+README.md
+Makefile
+
+# Ignore test files
+*_test.go
+tests/
+coverage.out
+
+# Ignore build artifacts
+bin/
+.env*
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore temporary files
+*.tmp
+*.log
+
+# Ignore documentation
+docs/
+*.md
+
+# Keep necessary files for build
+!go.mod
+!go.sum
+!proto/
+!internal/
+!cmd/
+!genproto/
