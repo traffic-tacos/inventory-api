@@ -1,9 +1,9 @@
 # Multi-stage Dockerfile for Go application
 # Stage 1: Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # Install build dependencies
-RUN apk --no-cache add ca-certificates git
+RUN apk --no-cache add ca-certificates git make
 
 # Set working directory
 WORKDIR /app
@@ -17,11 +17,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Generate protobuf files
+# Generate protobuf files (skip if proto files don't exist)
 RUN apk --no-cache add protobuf protobuf-dev
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-RUN PATH=$PATH:/root/go/bin make generate
+# Skip protoc generation in Docker build - proto files should be pre-generated
 
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
