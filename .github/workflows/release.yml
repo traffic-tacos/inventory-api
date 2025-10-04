@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          # AMD64
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o inventory-api-linux-amd64 \
+            ./cmd/inventory-api
+
+          # ARM64
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o inventory-api-linux-arm64 \
+            ./cmd/inventory-api
+
+          # Darwin AMD64
+          GOOS=darwin GOARCH=amd64 go build \
+            -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o inventory-api-darwin-amd64 \
+            ./cmd/inventory-api
+
+          # Darwin ARM64 (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build \
+            -ldflags="-w -s -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o inventory-api-darwin-arm64 \
+            ./cmd/inventory-api
+
+      - name: Create checksums
+        run: |
+          sha256sum inventory-api-* > checksums.txt
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+
+      - name: Generate Release Notes
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## What's Changed
+
+          ### Features
+          - High-performance gRPC inventory service
+          - Zero oversell guarantee with DynamoDB conditional updates
+          - Multi-platform support (AMD64/ARM64)
+          - Comprehensive observability (OpenTelemetry + Prometheus)
+
+          ### Docker Images
+          
+          ```bash
+          # Pull the image
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          
+          # Run the container
+          docker run -p 8080:8080 \
+            -e AWS_REGION=ap-northeast-2 \
+            -e DDB_TABLE_INVENTORY=inventory \
+            -e DDB_TABLE_SEATS=inventory_seats \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          ```
+
+          ### Binaries
+
+          Download the appropriate binary for your platform:
+          - **Linux AMD64**: `inventory-api-linux-amd64`
+          - **Linux ARM64**: `inventory-api-linux-arm64`
+          - **macOS AMD64**: `inventory-api-darwin-amd64`
+          - **macOS ARM64**: `inventory-api-darwin-arm64`
+
+          Verify checksums using `checksums.txt`.
+
+          ### Kubernetes Deployment
+
+          ```bash
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: inventory-api
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: inventory-api
+            template:
+              metadata:
+                labels:
+                  app: inventory-api
+              spec:
+                containers:
+                - name: inventory-api
+                  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+                  ports:
+                  - containerPort: 8080
+                  env:
+                  - name: AWS_REGION
+                    value: "ap-northeast-2"
+          EOF
+          ```
+
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/v0.0.0...${{ steps.version.outputs.VERSION }}
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            inventory-api-*
+            checksums.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

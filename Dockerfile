@@ -1,63 +1,82 @@
-# Multi-stage Dockerfile for Go application
-# Stage 1: Build stage
-FROM golang:1.23-alpine AS builder
+# Build stage
+FROM golang:1.24-alpine AS builder
 
-# Install build dependencies
-RUN apk --no-cache add ca-certificates git make
+# Metadata labels
+LABEL maintainer="Traffic Tacos Team" \
+      description="Inventory API - High-performance gRPC service for ticket inventory management" \
+      version="1.0.0"
 
-# Set working directory
-WORKDIR /app
+# Install necessary packages for building
+RUN apk add --no-cache git ca-certificates tzdata
 
-# Copy go mod files
+# Create non-root user for security
+ENV USER=appuser
+ENV UID=10001
+
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "${UID}" \
+    "${USER}"
+
+WORKDIR /build
+
+# Copy dependency files first for better Docker layer caching
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN go mod download && go mod verify
 
 # Copy source code
 COPY . .
 
-# Generate protobuf files (skip if proto files don't exist)
-RUN apk --no-cache add protobuf protobuf-dev
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-# Skip protoc generation in Docker build - proto files should be pre-generated
+# Build arguments for multi-platform builds
+ARG TARGETARCH
+ARG TARGETOS=linux
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -a -installsuffix cgo \
-    -ldflags="-w -s" \
-    -o inventory-api \
-    ./cmd/inventory-api
+# Build the binary with optimizations
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
+    -ldflags="-w -s -extldflags \"-static\" -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
+    -trimpath \
+    -tags netgo \
+    -installsuffix cgo \
+    -o inventory-api ./cmd/inventory-api \
+    && chmod +x inventory-api
 
-# Stage 2: Runtime stage
-FROM alpine:3.19
+# Final stage - use distroless for minimal attack surface
+FROM gcr.io/distroless/static-debian12
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates tzdata
+# Copy runtime dependencies
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group /etc/group
 
-# Create non-root user
-RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup
+# Copy timezone data if needed
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
-# Set working directory
-WORKDIR /app
+# Copy our static executable
+COPY --from=builder /build/inventory-api /inventory-api
 
-# Copy binary from builder stage
-COPY --from=builder /app/inventory-api .
+# Use an unprivileged user
+USER appuser:appuser
 
-# Change ownership to non-root user
-RUN chown -R appuser:appgroup /app
+# Expose gRPC port
+EXPOSE 8080
 
-# Switch to non-root user
-USER appuser
+# Health check - check if binary is executable
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["/inventory-api", "--help"] || exit 1
 
-# Expose ports
-EXPOSE 8020 8021
+# Metadata
+LABEL org.opencontainers.image.title="Inventory API" \
+      org.opencontainers.image.description="High-performance gRPC service for ticket inventory management" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.vendor="Traffic Tacos"
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost:8021/health || exit 1
-
-# Command to run
-CMD ["./inventory-api"]
+# Run the binary
+ENTRYPOINT ["/inventory-api"]

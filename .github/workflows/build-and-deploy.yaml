@@ -1,0 +1,128 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 137406935518.dkr.ecr.ap-northeast-2.amazonaws.com
+  SERVICE_NAME: inventory-api
+  DEPLOYMENT_REPO: traffic-tacos/deployment-repo
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata for Docker
+        id: meta
+        run: |
+          # Generate image tag based on git commit
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          
+          if [ "$BRANCH_NAME" = "main" ]; then
+            IMAGE_TAG="${SHORT_SHA}"
+          else
+            IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
+          fi
+          
+          echo "version=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            TARGETARCH=amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}
+            ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Output build summary
+        run: |
+          echo "### 🐳 Docker Image Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Git SHA:** ${{ steps.meta.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ steps.meta.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Full Image:** \`${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+
+  update-deployment:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Trigger deployment repo update
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.DEPLOYMENT_REPO_TOKEN }}" \
+            https://api.github.com/repos/${{ env.DEPLOYMENT_REPO }}/dispatches \
+            -d '{
+              "event_type": "update-image-tag",
+              "client_payload": {
+                "service_name": "${{ env.SERVICE_NAME }}",
+                "image_tag": "${{ needs.build-and-push.outputs.image_tag }}",
+                "image_registry": "${{ env.ECR_REGISTRY }}",
+                "triggered_by": "${{ github.actor }}",
+                "commit_sha": "${{ github.sha }}"
+              }
+            }'
+
+      - name: Deployment summary
+        run: |
+          echo "### 🚀 Deployment Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**New Image Tag:** ${{ needs.build-and-push.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Repo:** ${{ env.DEPLOYMENT_REPO }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will automatically sync the changes." >> $GITHUB_STEP_SUMMARY
+
