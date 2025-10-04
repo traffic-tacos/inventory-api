@@ -6,6 +6,8 @@ import (
 	"net"
 	"time"
 
+	"net/http"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	reservationv1 "github.com/traffic-tacos/proto-contracts/gen/go/reservation/v1"
 	"github.com/traffictacos/inventory-api/internal/config"
@@ -14,7 +16,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
-	"net/http"
 )
 
 type GRPCServer struct {
@@ -123,5 +124,5 @@ func startMetricsServer(logger *observability.Logger) {
 
 func healthCheck(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, _ = w.Write([]byte("OK"))
 }
