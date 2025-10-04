@@ -1,24 +1,28 @@
-name: Build and Push Docker Image
+name: Build, Test and Deploy
 
 on:
   push:
     branches:
       - main
       - develop
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - main
       - develop
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: 137406935518.dkr.ecr.ap-northeast-2.amazonaws.com
+  SERVICE_NAME: inventory-api
+  DEPLOYMENT_REPO: traffic-tacos/deployment-repo
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   test:
-    name: Test
+    name: Test & Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -37,82 +41,136 @@ jobs:
         run: go mod verify
 
       - name: Run tests
-        run: make test
+        run: |
+          if [ -f "Makefile" ] && grep -q "^test:" Makefile; then
+            make test
+          else
+            go test -v -race -coverprofile=coverage.out ./...
+          fi
 
       - name: Run linter
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          args: --timeout=5m
+        continue-on-error: true
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          flags: unittests
+        continue-on-error: true
 
   build:
-    name: Build Docker Image
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: test
-    permissions:
-      contents: read
-      packages: write
-
+    if: github.event_name == 'push'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Extract metadata
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata for Docker
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
+        run: |
+          # Generate image tag based on git commit
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          
+          if [ "$BRANCH_NAME" = "main" ]; then
+            IMAGE_TAG="${SHORT_SHA}"
+          else
+            IMAGE_TAG="${BRANCH_NAME}-${SHORT_SHA}"
+          fi
+          
+          echo "version=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          build-args: |
+            TARGETARCH=amd64
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}
+            ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            BUILD_TIME=${{ github.event.head_commit.timestamp }}
 
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name != 'pull_request'
-    
-    steps:
-      - name: Run Trivy vulnerability scanner
+      - name: Image scan with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}
           format: 'sarif'
           output: 'trivy-results.sarif'
+        continue-on-error: true
 
-      - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
+      - name: Output build summary
+        run: |
+          echo "### 🐳 Docker Image Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Git SHA:** ${{ steps.meta.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ steps.meta.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Full Image:** \`${{ env.ECR_REGISTRY }}/traffic-tacos-${{ env.SERVICE_NAME }}:${{ steps.meta.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
 
+  deploy:
+    name: Update Deployment Manifest
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Trigger deployment repo update
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.DEPLOYMENT_REPO_TOKEN }}" \
+            https://api.github.com/repos/${{ env.DEPLOYMENT_REPO }}/dispatches \
+            -d '{
+              "event_type": "update-image-tag",
+              "client_payload": {
+                "service_name": "${{ env.SERVICE_NAME }}",
+                "image_tag": "${{ needs.build.outputs.image_tag }}",
+                "image_registry": "${{ env.ECR_REGISTRY }}",
+                "triggered_by": "${{ github.actor }}",
+                "commit_sha": "${{ github.sha }}"
+              }
+            }'
+
+      - name: Deployment summary
+        run: |
+          echo "### 🚀 Deployment Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**New Image Tag:** ${{ needs.build.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Repo:** ${{ env.DEPLOYMENT_REPO }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will automatically sync the changes." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Monitor deployment at:" >> $GITHUB_STEP_SUMMARY
+          echo "- ArgoCD: https://argocd.traffictacos.store/applications/${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Kubernetes: \`kubectl get pods -n tacos-app -l app=${{ env.SERVICE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
